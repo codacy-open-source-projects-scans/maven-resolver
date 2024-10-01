@@ -1,0 +1,220 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.eclipse.aether.internal.impl.resolution;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.eclipse.aether.DefaultRepositorySystemSession;
+import org.eclipse.aether.RepositorySystemSession;
+import org.eclipse.aether.artifact.Artifact;
+import org.eclipse.aether.artifact.DefaultArtifact;
+import org.eclipse.aether.internal.impl.checksum.Sha1ChecksumAlgorithmFactory;
+import org.eclipse.aether.internal.test.util.TestUtils;
+import org.eclipse.aether.repository.ArtifactRepository;
+import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.resolution.ArtifactRequest;
+import org.eclipse.aether.resolution.ArtifactResult;
+import org.eclipse.aether.spi.checksums.TrustedChecksumsSource;
+import org.eclipse.aether.spi.connector.checksum.ChecksumAlgorithmFactory;
+import org.eclipse.aether.spi.connector.checksum.ChecksumAlgorithmFactorySelector;
+import org.eclipse.aether.util.artifact.ArtifactIdUtils;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import static java.util.stream.Collectors.toList;
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * UT for {@link TrustedChecksumsArtifactResolverPostProcessor}.
+ */
+public class TrustedChecksumsArtifactResolverPostProcessorTest implements TrustedChecksumsSource {
+    private static final String TRUSTED_SOURCE_NAME = "test";
+
+    private Artifact artifactWithoutTrustedChecksum;
+
+    private Artifact artifactWithTrustedChecksum;
+
+    private String artifactTrustedChecksum;
+
+    protected DefaultRepositorySystemSession session;
+
+    protected ChecksumAlgorithmFactory checksumAlgorithmFactory = new Sha1ChecksumAlgorithmFactory();
+
+    private TrustedChecksumsArtifactResolverPostProcessor subject;
+
+    private TrustedChecksumsSource.Writer trustedChecksumsWriter;
+
+    @BeforeEach
+    void prepareSubject() throws IOException {
+        Files.createDirectories(Paths.get(System.getProperty("java.io.tmpdir"))); // hack for Surefire
+        // make the two artifacts, BOTH as resolved
+        File tmp = Files.createTempFile("artifact", "tmp").toFile();
+        artifactWithoutTrustedChecksum = new DefaultArtifact("test:test:1.0").setFile(tmp);
+        artifactWithTrustedChecksum = new DefaultArtifact("test:test:2.0").setFile(tmp);
+        artifactTrustedChecksum = "da39a3ee5e6b4b0d3255bfef95601890afd80709"; // empty file
+
+        session = TestUtils.newSession();
+        ChecksumAlgorithmFactorySelector selector = new ChecksumAlgorithmFactorySelector() {
+            @Override
+            public ChecksumAlgorithmFactory select(String algorithmName) {
+                if (checksumAlgorithmFactory.getName().equals(algorithmName)) {
+                    return checksumAlgorithmFactory;
+                }
+                throw new IllegalArgumentException("no alg factory for " + algorithmName);
+            }
+
+            @Override
+            public List<ChecksumAlgorithmFactory> selectList(Collection<String> algorithmNames) {
+                return algorithmNames.stream().map(this::select).collect(toList());
+            }
+
+            @Override
+            public Collection<ChecksumAlgorithmFactory> getChecksumAlgorithmFactories() {
+                return Collections.singletonList(checksumAlgorithmFactory);
+            }
+
+            @Override
+            public boolean isChecksumExtension(String extension) {
+                throw new RuntimeException("not implemented");
+            }
+        };
+        subject = new TrustedChecksumsArtifactResolverPostProcessor(
+                selector, Collections.singletonMap(TRUSTED_SOURCE_NAME, this));
+        trustedChecksumsWriter = null;
+        session.setConfigProperty("aether.artifactResolver.postProcessor.trustedChecksums", Boolean.TRUE.toString());
+    }
+
+    // -- TrustedChecksumsSource interface BEGIN
+
+    @Override
+    public Map<String, String> getTrustedArtifactChecksums(
+            RepositorySystemSession session,
+            Artifact artifact,
+            ArtifactRepository artifactRepository,
+            List<ChecksumAlgorithmFactory> checksumAlgorithmFactories) {
+        if (ArtifactIdUtils.toId(artifactWithTrustedChecksum).equals(ArtifactIdUtils.toId(artifact))) {
+            return Collections.singletonMap(checksumAlgorithmFactory.getName(), artifactTrustedChecksum);
+        } else {
+            return Collections.emptyMap();
+        }
+    }
+
+    @Override
+    public Writer getTrustedArtifactChecksumsWriter(RepositorySystemSession session) {
+        return trustedChecksumsWriter;
+    }
+
+    // -- TrustedChecksumsSource interface END
+
+    private ArtifactResult createArtifactResult(Artifact artifact) {
+        ArtifactResult artifactResult = new ArtifactResult(new ArtifactRequest().setArtifact(artifact));
+        artifactResult.setArtifact(artifact);
+        artifactResult.setRepository(
+                new RemoteRepository.Builder("central", "default", "https://repo.maven.apache.org/maven2/").build());
+        return artifactResult;
+    }
+
+    // UTs below
+
+    @Test
+    void haveMatchingChecksumPass() {
+        ArtifactResult artifactResult = createArtifactResult(artifactWithTrustedChecksum);
+        assertTrue(artifactResult.isResolved());
+
+        subject.postProcess(session, Collections.singletonList(artifactResult));
+        assertTrue(artifactResult.isResolved());
+    }
+
+    @Test
+    void haveNoChecksumPass() {
+        ArtifactResult artifactResult = createArtifactResult(artifactWithoutTrustedChecksum);
+        assertTrue(artifactResult.isResolved());
+
+        subject.postProcess(session, Collections.singletonList(artifactResult));
+        assertTrue(artifactResult.isResolved());
+    }
+
+    @Test
+    void haveNoChecksumFailIfMissingEnabledFail() {
+        session.setConfigProperty(
+                "aether.artifactResolver.postProcessor.trustedChecksums.failIfMissing", Boolean.TRUE.toString());
+        ArtifactResult artifactResult = createArtifactResult(artifactWithoutTrustedChecksum);
+        assertTrue(artifactResult.isResolved());
+
+        subject.postProcess(session, Collections.singletonList(artifactResult));
+        assertFalse(artifactResult.isResolved());
+        assertFalse(artifactResult.getExceptions().isEmpty());
+        assertTrue(artifactResult
+                .getExceptions()
+                .get(0)
+                .getMessage()
+                .contains("Missing from " + TRUSTED_SOURCE_NAME + " trusted"));
+    }
+
+    @Test
+    void haveMismatchingChecksumFail() {
+        artifactTrustedChecksum = "foobar";
+        ArtifactResult artifactResult = createArtifactResult(artifactWithTrustedChecksum);
+        assertTrue(artifactResult.isResolved());
+
+        subject.postProcess(session, Collections.singletonList(artifactResult));
+        assertFalse(artifactResult.isResolved());
+        assertFalse(artifactResult.getExceptions().isEmpty());
+        assertTrue(artifactResult.getExceptions().get(0).getMessage().contains("trusted checksum mismatch"));
+        assertTrue(artifactResult
+                .getExceptions()
+                .get(0)
+                .getMessage()
+                .contains(TRUSTED_SOURCE_NAME + "=" + artifactTrustedChecksum));
+    }
+
+    @Test
+    void recordCalculatedChecksum() {
+        AtomicReference<String> recordedChecksum = new AtomicReference<>(null);
+        this.trustedChecksumsWriter = new Writer() {
+            @Override
+            public void addTrustedArtifactChecksums(
+                    Artifact artifact,
+                    ArtifactRepository artifactRepository,
+                    List<ChecksumAlgorithmFactory> checksumAlgorithmFactories,
+                    Map<String, String> trustedArtifactChecksums) {
+                recordedChecksum.set(trustedArtifactChecksums.get(checksumAlgorithmFactory.getName()));
+            }
+        };
+        session.setConfigProperty(
+                "aether.artifactResolver.postProcessor.trustedChecksums.record", Boolean.TRUE.toString());
+        ArtifactResult artifactResult = createArtifactResult(artifactWithTrustedChecksum);
+        assertTrue(artifactResult.isResolved());
+
+        subject.postProcess(session, Collections.singletonList(artifactResult));
+        assertTrue(artifactResult.isResolved());
+
+        String checksum = recordedChecksum.get();
+        assertNotNull(checksum);
+        assertEquals(checksum, artifactTrustedChecksum);
+    }
+}
