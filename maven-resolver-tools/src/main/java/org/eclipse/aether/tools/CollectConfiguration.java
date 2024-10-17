@@ -39,6 +39,7 @@ import org.apache.velocity.VelocityContext;
 import org.apache.velocity.app.VelocityEngine;
 import org.apache.velocity.runtime.resource.loader.ClasspathResourceLoader;
 import org.jboss.forge.roaster.Roaster;
+import org.jboss.forge.roaster.model.JavaDoc;
 import org.jboss.forge.roaster.model.JavaDocCapable;
 import org.jboss.forge.roaster.model.JavaDocTag;
 import org.jboss.forge.roaster.model.JavaType;
@@ -49,6 +50,8 @@ public class CollectConfiguration {
     public static void main(String[] args) throws Exception {
         Path start = Paths.get(args.length > 0 ? args[0] : ".");
         Path output = Paths.get(args.length > 1 ? args[1] : "output");
+        Path props = Paths.get(args.length > 2 ? args[2] : "props");
+        Path yaml = Paths.get(args.length > 3 ? args[3] : "yaml");
 
         TreeMap<String, ConfigurationKey> discoveredKeys = new TreeMap<>();
         Files.walk(start)
@@ -94,7 +97,7 @@ public class CollectConfiguration {
                                                     key,
                                                     defValue,
                                                     fqName,
-                                                    f.getJavaDoc().getText(),
+                                                    cleanseJavadoc(f),
                                                     nvl(getSince(f), ""),
                                                     getConfigurationSource(f),
                                                     configurationType,
@@ -115,6 +118,45 @@ public class CollectConfiguration {
         try (BufferedWriter fileWriter = Files.newBufferedWriter(output)) {
             velocityEngine.getTemplate("page.vm").merge(context, fileWriter);
         }
+        try (BufferedWriter fileWriter = Files.newBufferedWriter(props)) {
+            velocityEngine.getTemplate("props.vm").merge(context, fileWriter);
+        }
+        try (BufferedWriter fileWriter = Files.newBufferedWriter(yaml)) {
+            velocityEngine.getTemplate("yaml.vm").merge(context, fileWriter);
+        }
+    }
+
+    private static String cleanseJavadoc(FieldSource<JavaClassSource> javaClassSource) {
+        JavaDoc<FieldSource<JavaClassSource>> javaDoc = javaClassSource.getJavaDoc();
+        String[] text = javaDoc.getFullText().split("\n");
+        StringBuilder result = new StringBuilder();
+        for (String line : text) {
+            if (!line.startsWith("@") && !line.trim().isEmpty()) {
+                result.append(line);
+            }
+        }
+        return cleanseTags(result.toString());
+    }
+
+    private static String cleanseTags(String text) {
+        // {@code XXX} -> <pre>XXX</pre>
+        // {@link XXX} -> ??? pre for now
+        Pattern pattern = Pattern.compile("(\\{@\\w\\w\\w\\w (.+?)})");
+        Matcher matcher = pattern.matcher(text);
+        if (!matcher.find()) {
+            return text;
+        }
+        int prevEnd = 0;
+        StringBuilder result = new StringBuilder();
+        do {
+            result.append(text, prevEnd, matcher.start(1));
+            result.append("<code>");
+            result.append(matcher.group(2));
+            result.append("</code>");
+            prevEnd = matcher.end(1);
+        } while (matcher.find());
+        result.append(text, prevEnd, text.length());
+        return result.toString();
     }
 
     private static JavaType<?> parse(Path path) {
