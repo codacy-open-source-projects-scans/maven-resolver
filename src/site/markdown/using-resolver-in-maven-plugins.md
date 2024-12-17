@@ -36,14 +36,14 @@ POM:
       <!-- required in all cases -->
       <groupId>org.apache.maven.resolver</groupId>
       <artifactId>maven-resolver-api</artifactId>
-      <version>1.9.20</version>
+      <version>1.9.22</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <!-- optional helpers, might be superfluous depending on your use case -->
       <groupId>org.apache.maven.resolver</groupId>
       <artifactId>maven-resolver-util</artifactId>
-      <version>1.9.20</version>
+      <version>1.9.22</version>
       <!-- Scope: use compile to make plugin work in Maven 3.8 and earlier -->
       <scope>compile</scope>
     </dependency>
@@ -58,7 +58,7 @@ enforced by the Maven core, just like other Maven APIs. So be sure to
 compile/test your plugin against the version of `maven-resolver-api` that is
 used by the minimum version of Maven that your plugin wants to support.
 
-Next, in your mojo source, you would need to grab the repository related
+Next, in your mojo source, you need to grab the repository related
 components and parameters:
 
 ```java
@@ -71,36 +71,41 @@ public class MyMojo extends AbstractMojo
 {
 
     /**
-     * The entry point to resolver (fka. Aether), i.e. the component doing all the work.
-     */
-    @Component
-    private RepositorySystem repoSystem;
-
-    /**
      * The current repository/network configuration of Maven.
      */
     @Parameter(defaultValue="${repositorySystemSession}", readonly = true)
-    private RepositorySystemSession repoSession;
+    private RepositorySystemSession repositorySystemSession;
 
     /**
      * The project's remote repositories to use for the resolution of project dependencies.
      */
     @Parameter(defaultValue = "${project.remoteProjectRepositories}", readonly = true)
-    private List<RemoteRepository> projectRepos;
+    private List<RemoteRepository> remoteProjectRepositories;
 
     /**
      * The project's remote repositories to use for the resolution of plugins and their dependencies.
      */
     @Parameter(defaultValue = "${project.remotePluginRepositories}", readonly = true)
-    private List<RemoteRepository> pluginRepos;
+    private List<RemoteRepository> remotePluginRepositories;
 
+
+    /**
+     * The entry point to the resolver (a.k.a. Aether); that is, the component doing all the work.
+     */
+    private final RepositorySystem repositorySystem;
+    
+    @Inject
+    public MyMojo(RepositorySystem repositorySystem) {
+        this.repositorySystem = repositorySystem;
+    }
+    
     // Your other mojo parameters and code here
     ...
 }
 ```
 
-Usually, you need only `projectRepos` or `pluginRepos` depending on the
-nature of artifacts your plugin is dealing with, so the other plugin
+Usually, you need only `remoteProjectRepositories` or `remotePluginRepositories`
+depending on the nature of artifacts your plugin is dealing with. The other plugin
 parameter would be superfluous in that case. But in general, the bits
-shown above should give you all handles that you need to work with
+shown above should give you all the handles that you need to work with
 Aether from within a Maven plugin.

@@ -39,18 +39,14 @@ under the License.
 
 ]]#
 
-#macro(yesno $val)
-  #if ($val) Yes #else No #end
-#end
-
 #macro(value $val)
 #if ($val) `$val` #else - #end
 #end
 
-| No | Key | Type | Description | Default Value | Since | Supports Repo ID suffix | Source |
-| --- | --- | --- | --- | --- | --- | --- | --- |
+| Key | Type | Description | Default Value | Since | Supports Repo ID suffix | Source |
+| --- | --- | --- | --- | --- | --- | --- |
 #foreach($key in $keys)
-| $foreach.count. | `$key.key` | `$key.configurationType` | $key.description | #value( $key.defaultValue ) | $key.since | #yesno( $key.supportRepoIdSuffix ) | $key.configurationSource |
+| `$key.key` | `$key.configurationType` | $key.description | #value( $key.defaultValue ) | $key.since |  $key.supportRepoIdSuffix  | $key.configurationSource |
 #end
 
 #[[
@@ -70,5 +66,5 @@ From | To | With
 ## Set Configuration from Apache Maven
 
 To set one of the configuration options from above just use system variables. As system variables only support String values the type conversion mentioned above needs to be leveraged.
-Sometimes Maven uses different default values than the Maven Resolver itself or tries to extract certain values from the `settings.xml`. For details refer to <https://github.com/apache/maven/blob/master/maven-core/src/main/java/org/apache/maven/internal/aether/DefaultRepositorySystemSessionFactory.java>.
+Sometimes Maven uses different default values than the Maven Resolver itself or tries to extract certain values from the `settings.xml`. For details refer to [`DefaultRepositorySystemSessionFactory`](https://github.com/apache/maven/blob/master/impl/maven-core/src/main/java/org/apache/maven/internal/aether/DefaultRepositorySystemSessionFactory.java).
 ]]#

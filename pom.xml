@@ -29,7 +29,7 @@
 
   <groupId>org.apache.maven.resolver</groupId>
   <artifactId>maven-resolver</artifactId>
-  <version>2.0.3-SNAPSHOT</version>
+  <version>2.0.6-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <name>Maven Artifact Resolver</name>
@@ -104,8 +104,8 @@
     <sisuVersion>0.9.0.M3</sisuVersion>
     <guiceVersion>6.0.0</guiceVersion>
     <slf4jVersion>2.0.16</slf4jVersion>
-    <testcontainersVersion>1.20.3</testcontainersVersion>
-    <bouncycastleVersion>1.78.1</bouncycastleVersion>
+    <testcontainersVersion>1.20.4</testcontainersVersion>
+    <bouncycastleVersion>1.79</bouncycastleVersion>
 
     <!-- Remove when parent updates -->
     <versions.junit5>5.11.2</versions.junit5>
@@ -114,11 +114,11 @@
     <jettyVersion>10.0.24</jettyVersion>
     <!-- used by supplier and demo only -->
     <maven3Version>3.9.9</maven3Version>
-    <maven4Version>4.0.0-beta-5</maven4Version>
+    <maven4Version>4.0.0-rc-1</maven4Version>
     <minimalMavenBuildVersion>[3.8.8,)</minimalMavenBuildVersion>
     <!-- MRESOLVER-422: keep this in sync with Javadoc plugin configuration (but cannot directly, as this below is range) -->
     <minimalJavaBuildVersion>[21,)</minimalJavaBuildVersion>
-    <project.build.outputTimestamp>2024-10-14T20:25:34Z</project.build.outputTimestamp>
+    <project.build.outputTimestamp>2024-12-13T12:11:47Z</project.build.outputTimestamp>
     <!-- site fixes: skip PMD as it does not support Java 21 -->
     <pmd.skip>true</pmd.skip>
     <bnd.instructions.additions />
@@ -199,6 +199,11 @@
       <dependency>
         <groupId>org.apache.maven.resolver</groupId>
         <artifactId>maven-resolver-generator-gnupg</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.maven.resolver</groupId>
+        <artifactId>maven-resolver-generator-sigstore</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
@@ -288,6 +293,12 @@
       <dependency>
         <groupId>org.slf4j</groupId>
         <artifactId>slf4j-simple</artifactId>
+        <version>${slf4jVersion}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-nop</artifactId>
         <version>${slf4jVersion}</version>
         <scope>test</scope>
       </dependency>
@@ -640,7 +651,7 @@
         <plugin>
           <groupId>biz.aQute.bnd</groupId>
           <artifactId>bnd-maven-plugin</artifactId>
-          <version>7.0.0</version>
+          <version>7.1.0</version>
           <configuration>
             <bnd><![CDATA[
               Bundle-SymbolicName: org.apache.${replacestring;${project.artifactId};-;.}
