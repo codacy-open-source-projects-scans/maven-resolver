@@ -1,0 +1,25 @@
+# see https://s.apache.org/asfyaml
+github:
+  description: "Apache Maven Artifact Resolver"
+  homepage: https://maven.apache.org/resolver/
+  labels:
+    - java
+    - build-management
+    - apache-maven
+    - maven
+  protected_branches:
+    master: { }
+    maven-resolver-1.9.x: { }
+    maven-resolver-1.6.x: { }
+  pull_requests:
+    del_branch_on_merge: true
+  enabled_merge_buttons:
+    squash: true
+    merge: false
+    rebase: true
+  features:
+    issues: true
+notifications:
+  commits: commits@maven.apache.org
+  issues: issues@maven.apache.org
+  pullrequests: issues@maven.apache.org
