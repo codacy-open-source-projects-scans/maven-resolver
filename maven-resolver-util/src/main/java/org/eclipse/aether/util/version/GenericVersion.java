@@ -45,7 +45,7 @@ final class GenericVersion implements Version {
     /**
      * Creates a generic version from the specified string.
      *
-     * @param version The version string, must not be {@code null}.
+     * @param version the version string, must not be {@code null}
      */
     GenericVersion(String version) {
         this.version = requireNonNull(version, "version cannot be null");
@@ -235,8 +235,8 @@ final class GenericVersion implements Version {
                     index++;
                     break;
                 } else {
-                    int digit = Character.digit(c, 10);
-                    if (digit >= 0) {
+                    if (c >= '0' && c <= '9') { // only ASCII digits
+                        int digit = c - '0';
                         if (state == -1) {
                             end = index;
                             terminatedByNumber = true;

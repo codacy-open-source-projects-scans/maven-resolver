@@ -38,7 +38,9 @@ import org.eclipse.aether.impl.UpdateCheckManager;
 import org.eclipse.aether.impl.VersionResolver;
 import org.eclipse.aether.internal.impl.filter.DefaultRemoteRepositoryFilterManager;
 import org.eclipse.aether.internal.impl.filter.Filters;
-import org.eclipse.aether.internal.test.util.*;
+import org.eclipse.aether.internal.test.util.TestFileUtils;
+import org.eclipse.aether.internal.test.util.TestLocalRepositoryManager;
+import org.eclipse.aether.internal.test.util.TestUtils;
 import org.eclipse.aether.metadata.Metadata;
 import org.eclipse.aether.repository.LocalArtifactRegistration;
 import org.eclipse.aether.repository.LocalArtifactRequest;
@@ -61,6 +63,7 @@ import org.eclipse.aether.resolution.VersionResult;
 import org.eclipse.aether.spi.connector.ArtifactDownload;
 import org.eclipse.aether.spi.connector.MetadataDownload;
 import org.eclipse.aether.spi.connector.filter.RemoteRepositoryFilterSource;
+import org.eclipse.aether.spi.io.PathProcessorSupport;
 import org.eclipse.aether.transfer.ArtifactNotFoundException;
 import org.eclipse.aether.transfer.ArtifactTransferException;
 import org.eclipse.aether.util.repository.SimpleResolutionErrorPolicy;
@@ -110,7 +113,7 @@ public class DefaultArtifactResolverTest {
     private DefaultArtifactResolver setupArtifactResolver(
             VersionResolver versionResolver, UpdateCheckManager updateCheckManager) {
         return new DefaultArtifactResolver(
-                new TestPathProcessor(),
+                new PathProcessorSupport(),
                 new StubRepositoryEventDispatcher(),
                 versionResolver,
                 updateCheckManager,
@@ -171,7 +174,8 @@ public class DefaultArtifactResolverTest {
             assertSame(request, result.getRequest());
 
             assertFalse(result.getExceptions().isEmpty());
-            assertTrue(result.getExceptions().get(0) instanceof ArtifactNotFoundException);
+            assertInstanceOf(
+                    ArtifactNotFoundException.class, result.getExceptions().get(0));
 
             Artifact resolved = result.getArtifact();
             assertNull(resolved);
@@ -233,7 +237,8 @@ public class DefaultArtifactResolverTest {
             assertSame(request, result.getRequest());
 
             assertFalse(result.getExceptions().isEmpty());
-            assertTrue(result.getExceptions().get(0) instanceof ArtifactNotFoundException);
+            assertInstanceOf(
+                    ArtifactNotFoundException.class, result.getExceptions().get(0));
 
             Artifact resolved = result.getArtifact();
             assertNull(resolved);
@@ -284,7 +289,8 @@ public class DefaultArtifactResolverTest {
             assertSame(request, result.getRequest());
 
             assertFalse(result.getExceptions().isEmpty());
-            assertTrue(result.getExceptions().get(0) instanceof ArtifactNotFoundException);
+            assertInstanceOf(
+                    ArtifactNotFoundException.class, result.getExceptions().get(0));
             assertEquals("never-accept", result.getExceptions().get(0).getMessage());
 
             Artifact resolved = result.getArtifact();
@@ -334,7 +340,8 @@ public class DefaultArtifactResolverTest {
             assertSame(request, result.getRequest());
 
             assertFalse(result.getExceptions().isEmpty());
-            assertTrue(result.getExceptions().get(0) instanceof ArtifactNotFoundException);
+            assertInstanceOf(
+                    ArtifactNotFoundException.class, result.getExceptions().get(0));
             assertEquals("never-accept-id", result.getExceptions().get(0).getMessage());
 
             Artifact resolved = result.getArtifact();
@@ -399,9 +406,9 @@ public class DefaultArtifactResolverTest {
         } catch (ArtifactResolutionException e) {
             connector.assertSeenExpected();
             for (ArtifactResult result : e.getResults()) {
-                Throwable t = result.getExceptions().get(0);
-                assertTrue(t instanceof ArtifactNotFoundException, t.toString());
-                assertTrue(t.getMessage().contains("cached"), t.toString());
+                Exception ex = result.getExceptions().get(0);
+                assertInstanceOf(ArtifactNotFoundException.class, ex, ex.toString());
+                assertTrue(ex.getMessage().contains("cached"), ex.toString());
             }
         }
     }
@@ -651,7 +658,8 @@ public class DefaultArtifactResolverTest {
             assertSame(request, result.getRequest());
 
             assertFalse(result.getExceptions().isEmpty());
-            assertTrue(result.getExceptions().get(0) instanceof VersionResolutionException);
+            assertInstanceOf(
+                    VersionResolutionException.class, result.getExceptions().get(0));
 
             Artifact resolved = result.getArtifact();
             assertNull(resolved);

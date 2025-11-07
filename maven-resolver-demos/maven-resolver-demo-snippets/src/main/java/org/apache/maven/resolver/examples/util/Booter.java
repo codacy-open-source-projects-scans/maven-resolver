@@ -19,8 +19,7 @@
 package org.apache.maven.resolver.examples.util;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.nio.file.FileSystem;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,6 +31,7 @@ import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.RepositorySystemSession.SessionBuilder;
 import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.repository.RepositoryPolicy;
 import org.eclipse.aether.supplier.SessionBuilderSupplier;
 import org.eclipse.aether.util.graph.visitor.DependencyGraphDumper;
 
@@ -39,37 +39,58 @@ import org.eclipse.aether.util.graph.visitor.DependencyGraphDumper;
  * A helper to boot the repository system and a repository system session.
  */
 public class Booter {
-    public static final String SUPPLIER = "supplier";
+    public static final String FACTORY_SUPPLIER = "supplier";
 
-    public static final String SISU = "sisu";
+    public static final String FACTORY_SISU = "sisu";
+
+    public static final String FS_DEFAULT = "default";
+
+    public static final String FS_JIMFS = "jimfs";
 
     public static final DependencyGraphDumper DUMPER_SOUT = new DependencyGraphDumper(System.out::println);
 
     public static String selectFactory(String[] args) {
         if (args == null || args.length == 0) {
-            return SUPPLIER;
+            return FACTORY_SUPPLIER;
         } else {
             return args[0];
         }
     }
 
-    public static RepositorySystem newRepositorySystem(final String factory) {
-        switch (factory) {
-            case SUPPLIER:
-                return org.apache.maven.resolver.examples.supplier.SupplierRepositorySystemFactory
-                        .newRepositorySystem();
-            case SISU:
-                return org.apache.maven.resolver.examples.sisu.SisuRepositorySystemFactory.newRepositorySystem();
-            default:
-                throw new IllegalArgumentException("Unknown factory: " + factory);
+    public static String selectFs(String[] args) {
+        if (args == null || args.length < 2) {
+            return FS_DEFAULT;
+        } else {
+            return args[1];
         }
     }
 
-    public static SessionBuilder newRepositorySystemSession(RepositorySystem system) {
-        FileSystem fs = Jimfs.newFileSystem(Configuration.unix());
+    public static RepositorySystem newRepositorySystem(final String factory) {
+        System.out.println("Using factory: " + factory);
+        return switch (factory) {
+            case FACTORY_SUPPLIER -> org.apache.maven.resolver.examples.supplier.SupplierRepositorySystemFactory
+                    .newRepositorySystem();
+            case FACTORY_SISU -> org.apache.maven.resolver.examples.sisu.SisuRepositorySystemFactory
+                    .newRepositorySystem();
+            default -> throw new IllegalArgumentException("Unknown factory: " + factory);
+        };
+    }
+
+    public static SessionBuilder newRepositorySystemSession(RepositorySystem system, String fs) {
+        System.out.println("Using FS: " + fs);
+        boolean close;
+        Path localRepository;
+        if (FS_JIMFS.equals(fs)) {
+            close = true;
+            localRepository = Jimfs.newFileSystem(Configuration.unix()).getPath("/demo");
+        } else {
+            close = false;
+            localRepository = Path.of("target/example-snippets-repo");
+        }
+        // Path localRepository = Path.of("target/example-snippets-repo");
         SessionBuilder result = new SessionBuilderSupplier(system)
                 .get()
-                .withLocalRepositoryBaseDirectories(fs.getPath("local-repo"))
+                .withLocalRepositoryBaseDirectories(localRepository)
                 .setRepositoryListener(new ConsoleRepositoryListener())
                 .setTransferListener(new ConsoleTransferListener())
                 .setConfigProperty("aether.generator.gpg.enabled", Boolean.TRUE.toString())
@@ -77,18 +98,20 @@ public class Booter {
                         "aether.generator.gpg.keyFilePath",
                         Paths.get("src/main/resources/alice.key")
                                 .toAbsolutePath()
-                                .toString())
-                .setConfigProperty("aether.syncContext.named.factory", "noop");
-        result.addOnSessionEndedHandler(() -> {
-            try {
-                fs.close();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
-        });
+                                .toString());
 
         // uncomment to generate dirty trees
         // session.setDependencyGraphTransformer( null );
+
+        if (close) {
+            result.addOnSessionEndedHandler(() -> {
+                try {
+                    localRepository.getFileSystem().close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            });
+        }
 
         return result;
     }
@@ -98,6 +121,17 @@ public class Booter {
     }
 
     private static RemoteRepository newCentralRepository() {
-        return new RemoteRepository.Builder("central", "default", "https://repo.maven.apache.org/maven2/").build();
+        return new RemoteRepository.Builder("central", "default", "https://repo.maven.apache.org/maven2/")
+                .setReleasePolicy(new RepositoryPolicy(
+                        true,
+                        RepositoryPolicy.UPDATE_POLICY_NEVER,
+                        RepositoryPolicy.UPDATE_POLICY_DAILY,
+                        RepositoryPolicy.CHECKSUM_POLICY_FAIL))
+                .setSnapshotPolicy(new RepositoryPolicy(
+                        false,
+                        RepositoryPolicy.UPDATE_POLICY_NEVER,
+                        RepositoryPolicy.UPDATE_POLICY_DAILY,
+                        RepositoryPolicy.CHECKSUM_POLICY_FAIL))
+                .build();
     }
 }

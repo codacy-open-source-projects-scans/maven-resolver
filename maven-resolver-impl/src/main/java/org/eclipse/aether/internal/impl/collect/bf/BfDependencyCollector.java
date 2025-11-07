@@ -25,6 +25,7 @@ import javax.inject.Singleton;
 import java.io.Closeable;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,13 +34,11 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -72,7 +71,8 @@ import org.eclipse.aether.resolution.VersionRangeResult;
 import org.eclipse.aether.spi.artifact.decorator.ArtifactDecoratorFactory;
 import org.eclipse.aether.util.ConfigUtils;
 import org.eclipse.aether.util.artifact.ArtifactIdUtils;
-import org.eclipse.aether.util.concurrency.ExecutorUtils;
+import org.eclipse.aether.util.concurrency.SmartExecutor;
+import org.eclipse.aether.util.concurrency.SmartExecutorUtils;
 import org.eclipse.aether.util.graph.manager.DependencyManagerUtils;
 import org.eclipse.aether.version.Version;
 
@@ -92,21 +92,29 @@ public class BfDependencyCollector extends DependencyCollectorDelegate {
 
     /**
      * The key in the repository session's {@link RepositorySystemSession#getConfigProperties()
-     * configuration properties} used to store a {@link Boolean} flag controlling the resolver's skip mode.
+     * configuration properties} used to store a {@link String} flag controlling the resolver's skip mode.
+     * Supported modes are "versionless" (default), "versioned" and "false" to not use skipper. The first two modes
+     * are defining "function" how to map artifact coordinates to (String) key while deciding "skip" logic.
+     * The "versionless" uses {@code G:A:C:E} coordinate elements only (without version), while "versioned" uses
+     * all {@code G:A:C:E:V} artifact coordinates.
      *
      * @since 1.8.0
      * @configurationSource {@link RepositorySystemSession#getConfigProperties()}
-     * @configurationType {@link java.lang.Boolean}
+     * @configurationType {@link java.lang.String}
      * @configurationDefaultValue {@link #DEFAULT_SKIPPER}
      */
     public static final String CONFIG_PROP_SKIPPER = CONFIG_PROPS_PREFIX + "skipper";
+
+    public static final String NONE_SKIPPER = "false";
+    public static final String VERSIONLESS_SKIPPER = "versionless";
+    public static final String VERSIONED_SKIPPER = "versioned";
 
     /**
      * The default value for {@link #CONFIG_PROP_SKIPPER}, {@code true}.
      *
      * @since 1.8.0
      */
-    public static final boolean DEFAULT_SKIPPER = true;
+    public static final String DEFAULT_SKIPPER = VERSIONLESS_SKIPPER;
 
     /**
      * The count of threads to be used when collecting POMs in parallel.
@@ -149,18 +157,29 @@ public class BfDependencyCollector extends DependencyCollectorDelegate {
             List<Dependency> managedDependencies,
             Results results)
             throws DependencyCollectionException {
-        boolean useSkip = ConfigUtils.getBoolean(session, DEFAULT_SKIPPER, CONFIG_PROP_SKIPPER);
-        int nThreads = ExecutorUtils.threadCount(session, DEFAULT_THREADS, CONFIG_PROP_THREADS);
-        logger.debug("Using thread pool with {} threads to resolve descriptors.", nThreads);
-
-        if (useSkip) {
-            logger.debug("Collector skip mode enabled");
+        String skipperMode = ConfigUtils.getString(session, DEFAULT_SKIPPER, CONFIG_PROP_SKIPPER);
+        Supplier<DependencyResolutionSkipper> skipperSupplier;
+        if (NONE_SKIPPER.equals(skipperMode)) {
+            logger.debug("Collector skip mode disabled");
+            skipperSupplier = DependencyResolutionSkipper::neverSkipper;
+        } else if (VERSIONLESS_SKIPPER.equals(skipperMode)) {
+            logger.debug("Collector skip mode enabled: {} (key function GACE)", skipperMode);
+            skipperSupplier = DependencyResolutionSkipper::defaultGACESkipper;
+        } else if (VERSIONED_SKIPPER.equals(skipperMode)) {
+            logger.debug("Collector skip mode enabled: {} (key function GACEV)", skipperMode);
+            skipperSupplier = DependencyResolutionSkipper::defaultGACEVSkipper;
+        } else {
+            throw new IllegalArgumentException("Unknown skipper mode: " + skipperMode + "; known are "
+                    + Arrays.asList(VERSIONLESS_SKIPPER, VERSIONED_SKIPPER, NONE_SKIPPER));
         }
 
-        try (DependencyResolutionSkipper skipper = useSkip
-                        ? DependencyResolutionSkipper.defaultSkipper()
-                        : DependencyResolutionSkipper.neverSkipper();
-                ParallelDescriptorResolver parallelDescriptorResolver = new ParallelDescriptorResolver(nThreads)) {
+        try (DependencyResolutionSkipper skipper = skipperSupplier.get();
+                ParallelDescriptorResolver parallelDescriptorResolver =
+                        new ParallelDescriptorResolver(SmartExecutorUtils.smartExecutor(
+                                session,
+                                null, // we don't know ahead of time; we want global executor
+                                ConfigUtils.getInteger(session, DEFAULT_THREADS, CONFIG_PROP_THREADS),
+                                getClass().getSimpleName() + "-"))) {
             Args args = new Args(session, pool, context, versionContext, request, skipper, parallelDescriptorResolver);
 
             DependencySelector rootDepSelector = session.getDependencySelector() != null
@@ -470,23 +489,24 @@ public class BfDependencyCollector extends DependencyCollectorDelegate {
     }
 
     static class ParallelDescriptorResolver implements Closeable {
-        private final ExecutorService executorService;
+        private final SmartExecutor smartExecutor;
 
         /**
          * Artifact ID -> Future of DescriptorResolutionResult
          */
         private final Map<String, Future<DescriptorResolutionResult>> results = new ConcurrentHashMap<>(256);
 
-        ParallelDescriptorResolver(int threads) {
-            this.executorService = ExecutorUtils.threadPool(threads, getClass().getSimpleName() + "-");
+        ParallelDescriptorResolver(SmartExecutor smartExecutor) {
+            this.smartExecutor = smartExecutor;
         }
 
         void resolveDescriptors(Artifact artifact, Callable<DescriptorResolutionResult> callable) {
-            results.computeIfAbsent(ArtifactIdUtils.toId(artifact), key -> this.executorService.submit(callable));
+            results.computeIfAbsent(ArtifactIdUtils.toId(artifact), key -> smartExecutor.submit(callable));
         }
 
         void cacheVersionRangeDescriptor(Artifact artifact, DescriptorResolutionResult resolutionResult) {
-            results.computeIfAbsent(ArtifactIdUtils.toId(artifact), key -> new DoneFuture<>(resolutionResult));
+            results.computeIfAbsent(
+                    ArtifactIdUtils.toId(artifact), key -> CompletableFuture.completedFuture(resolutionResult));
         }
 
         Future<DescriptorResolutionResult> find(Artifact artifact) {
@@ -495,40 +515,7 @@ public class BfDependencyCollector extends DependencyCollectorDelegate {
 
         @Override
         public void close() {
-            executorService.shutdown();
-        }
-    }
-
-    static class DoneFuture<V> implements Future<V> {
-        private final V v;
-
-        DoneFuture(V v) {
-            this.v = v;
-        }
-
-        @Override
-        public boolean cancel(boolean mayInterruptIfRunning) {
-            return false;
-        }
-
-        @Override
-        public boolean isCancelled() {
-            return false;
-        }
-
-        @Override
-        public boolean isDone() {
-            return true;
-        }
-
-        @Override
-        public V get() throws InterruptedException, ExecutionException {
-            return v;
-        }
-
-        @Override
-        public V get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
-            return v;
+            smartExecutor.close();
         }
     }
 

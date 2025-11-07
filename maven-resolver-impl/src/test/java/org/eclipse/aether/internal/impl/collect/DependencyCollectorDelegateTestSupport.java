@@ -51,7 +51,7 @@ import org.eclipse.aether.util.graph.manager.ClassicDependencyManager;
 import org.eclipse.aether.util.graph.manager.DefaultDependencyManager;
 import org.eclipse.aether.util.graph.manager.DependencyManagerUtils;
 import org.eclipse.aether.util.graph.manager.TransitiveDependencyManager;
-import org.eclipse.aether.util.graph.transformer.ConflictResolver;
+import org.eclipse.aether.util.graph.transformer.ClassicConflictResolver;
 import org.eclipse.aether.util.graph.transformer.JavaScopeDeriver;
 import org.eclipse.aether.util.graph.transformer.JavaScopeSelector;
 import org.eclipse.aether.util.graph.transformer.NearestVersionSelector;
@@ -167,7 +167,7 @@ public abstract class DependencyCollectorDelegateTestSupport {
         });
         t.start();
         t.join();
-        assertTrue(cause.get() instanceof InterruptedException, String.valueOf(cause.get()));
+        assertInstanceOf(InterruptedException.class, cause.get(), String.valueOf(cause.get()));
     }
 
     @Test
@@ -202,7 +202,8 @@ public abstract class DependencyCollectorDelegateTestSupport {
             assertNotNull(result.getExceptions());
             assertEquals(1, result.getExceptions().size());
 
-            assertTrue(result.getExceptions().get(0) instanceof ArtifactDescriptorException);
+            assertInstanceOf(
+                    ArtifactDescriptorException.class, result.getExceptions().get(0));
 
             assertEquals(request.getRoot(), result.getRoot().getDependency());
         }
@@ -324,7 +325,8 @@ public abstract class DependencyCollectorDelegateTestSupport {
             assertNotNull(result.getExceptions());
             assertEquals(1, result.getExceptions().size());
 
-            assertTrue(result.getExceptions().get(0) instanceof ArtifactDescriptorException);
+            assertInstanceOf(
+                    ArtifactDescriptorException.class, result.getExceptions().get(0));
 
             assertEqualSubtree(root, result.getRoot());
         }
@@ -565,7 +567,7 @@ public abstract class DependencyCollectorDelegateTestSupport {
     void testDescriptorDependenciesEmpty() throws Exception {
         collector = setupCollector(newReader("dependencies-empty/"));
 
-        session.setDependencyGraphTransformer(new ConflictResolver(
+        session.setDependencyGraphTransformer(new ClassicConflictResolver(
                 new NearestVersionSelector(),
                 new JavaScopeSelector(),
                 new SimpleOptionalitySelector(),

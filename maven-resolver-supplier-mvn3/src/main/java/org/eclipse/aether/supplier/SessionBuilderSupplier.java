@@ -19,8 +19,10 @@
 package org.eclipse.aether.supplier;
 
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.function.Supplier;
 
+import org.apache.maven.utils.Os;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.RepositorySystemSession.CloseableSession;
 import org.eclipse.aether.RepositorySystemSession.SessionBuilder;
@@ -30,20 +32,21 @@ import org.eclipse.aether.collection.DependencyGraphTransformer;
 import org.eclipse.aether.collection.DependencyManager;
 import org.eclipse.aether.collection.DependencySelector;
 import org.eclipse.aether.collection.DependencyTraverser;
+import org.eclipse.aether.impl.scope.InternalScopeManager;
+import org.eclipse.aether.internal.impl.scope.ManagedDependencyContextRefiner;
+import org.eclipse.aether.internal.impl.scope.ManagedScopeDeriver;
+import org.eclipse.aether.internal.impl.scope.ManagedScopeSelector;
 import org.eclipse.aether.internal.impl.scope.OptionalDependencySelector;
 import org.eclipse.aether.internal.impl.scope.ScopeDependencySelector;
+import org.eclipse.aether.internal.impl.scope.ScopeManagerImpl;
 import org.eclipse.aether.resolution.ArtifactDescriptorPolicy;
 import org.eclipse.aether.util.artifact.DefaultArtifactTypeRegistry;
-import org.eclipse.aether.util.artifact.JavaScopes;
 import org.eclipse.aether.util.graph.manager.ClassicDependencyManager;
 import org.eclipse.aether.util.graph.selector.AndDependencySelector;
 import org.eclipse.aether.util.graph.selector.ExclusionDependencySelector;
 import org.eclipse.aether.util.graph.transformer.ChainedDependencyGraphTransformer;
 import org.eclipse.aether.util.graph.transformer.ConfigurableVersionSelector;
 import org.eclipse.aether.util.graph.transformer.ConflictResolver;
-import org.eclipse.aether.util.graph.transformer.JavaDependencyContextRefiner;
-import org.eclipse.aether.util.graph.transformer.JavaScopeDeriver;
-import org.eclipse.aether.util.graph.transformer.JavaScopeSelector;
 import org.eclipse.aether.util.graph.transformer.SimpleOptionalitySelector;
 import org.eclipse.aether.util.graph.traverser.FatArtifactTraverser;
 import org.eclipse.aether.util.repository.SimpleArtifactDescriptorPolicy;
@@ -63,13 +66,21 @@ import static java.util.Objects.requireNonNull;
  */
 public class SessionBuilderSupplier implements Supplier<SessionBuilder> {
     protected final RepositorySystem repositorySystem;
+    protected final InternalScopeManager scopeManager;
 
     public SessionBuilderSupplier(RepositorySystem repositorySystem) {
         this.repositorySystem = requireNonNull(repositorySystem);
+        this.scopeManager = new ScopeManagerImpl(Maven3ScopeManagerConfiguration.INSTANCE);
     }
 
     protected void configureSessionBuilder(SessionBuilder session) {
         session.setSystemProperties(System.getProperties());
+        boolean caseSensitive = !Os.IS_WINDOWS;
+        System.getenv().forEach((key, value) -> {
+            key = "env." + (caseSensitive ? key : key.toUpperCase(Locale.ENGLISH));
+            session.setSystemProperty(key, value);
+        });
+        session.setScopeManager(scopeManager);
         session.setDependencyTraverser(getDependencyTraverser());
         session.setDependencyManager(getDependencyManager());
         session.setDependencySelector(getDependencySelector());
@@ -78,17 +89,24 @@ public class SessionBuilderSupplier implements Supplier<SessionBuilder> {
         session.setArtifactDescriptorPolicy(getArtifactDescriptorPolicy());
     }
 
+    protected InternalScopeManager getScopeManager() {
+        return this.scopeManager;
+    }
+
     protected DependencyTraverser getDependencyTraverser() {
         return new FatArtifactTraverser();
     }
 
     protected DependencyManager getDependencyManager() {
-        return new ClassicDependencyManager(false, null);
+        return new ClassicDependencyManager(getScopeManager());
     }
 
     protected DependencySelector getDependencySelector() {
         return new AndDependencySelector(
-                ScopeDependencySelector.legacy(null, Arrays.asList(JavaScopes.TEST, JavaScopes.PROVIDED)),
+                ScopeDependencySelector.legacy(
+                        null,
+                        Arrays.asList(
+                                Maven3ScopeManagerConfiguration.DS_TEST, Maven3ScopeManagerConfiguration.DS_PROVIDED)),
                 OptionalDependencySelector.fromDirect(),
                 new ExclusionDependencySelector());
     }
@@ -96,9 +114,11 @@ public class SessionBuilderSupplier implements Supplier<SessionBuilder> {
     protected DependencyGraphTransformer getDependencyGraphTransformer() {
         return new ChainedDependencyGraphTransformer(
                 new ConflictResolver(
-                        new ConfigurableVersionSelector(), new JavaScopeSelector(),
-                        new SimpleOptionalitySelector(), new JavaScopeDeriver()),
-                new JavaDependencyContextRefiner());
+                        new ConfigurableVersionSelector(),
+                        new ManagedScopeSelector(getScopeManager()),
+                        new SimpleOptionalitySelector(),
+                        new ManagedScopeDeriver(getScopeManager())),
+                new ManagedDependencyContextRefiner(getScopeManager()));
     }
 
     protected ArtifactTypeRegistry getArtifactTypeRegistry() {

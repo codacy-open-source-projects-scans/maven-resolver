@@ -100,7 +100,6 @@ import org.eclipse.aether.spi.io.PathProcessor;
 import org.eclipse.aether.transfer.NoTransporterException;
 import org.eclipse.aether.transfer.TransferCancelledException;
 import org.eclipse.aether.util.ConfigUtils;
-import org.eclipse.aether.util.FileUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -392,6 +391,10 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
     private static HttpHost toHost(Proxy proxy) {
         HttpHost host = null;
         if (proxy != null) {
+            // in Maven, the proxy.protocol is used for proxy matching against remote repository protocol; no TLS proxy
+            // support
+            // https://github.com/apache/maven/issues/2519
+            // https://github.com/apache/maven-resolver/issues/745
             host = new HttpHost(proxy.getHost(), proxy.getPort());
         }
         return host;
@@ -533,7 +536,6 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
         }
     }
 
-    @SuppressWarnings("checkstyle:magicnumber")
     private void mkdirs(URI uri, SharingHttpContext context) throws Exception {
         List<URI> dirs = UriUtils.getDirectories(baseUri, uri);
         int index = 0;
@@ -610,7 +612,6 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
         return request;
     }
 
-    @SuppressWarnings("checkstyle:magicnumber")
     private <T extends HttpUriRequest> void resume(T request, GetTask task) throws IOException {
         long resumeOffset = task.getResumeOffset();
         if (resumeOffset > 0L && task.getDataPath() != null) {
@@ -622,7 +623,6 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
         }
     }
 
-    @SuppressWarnings("checkstyle:magicnumber")
     private void handleStatus(CloseableHttpResponse response) throws Exception {
         int status = response.getStatusLine().getStatusCode();
         if (status >= 300) {
@@ -682,7 +682,7 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
                     extractChecksums(response);
                 }
             } else {
-                try (FileUtils.CollocatedTempFile tempFile = FileUtils.newTempFile(dataFile)) {
+                try (PathProcessor.CollocatedTempFile tempFile = pathProcessor.newTempFile(dataFile)) {
                     task.setDataPath(tempFile.getPath(), resume);
                     if (resume && Files.isRegularFile(dataFile)) {
                         try (InputStream inputStream = Files.newInputStream(dataFile)) {

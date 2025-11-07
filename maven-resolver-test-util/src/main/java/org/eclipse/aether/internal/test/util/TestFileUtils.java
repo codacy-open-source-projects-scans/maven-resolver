@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Properties;
@@ -54,6 +55,7 @@ public class TestFileUtils {
         // hide constructor
     }
 
+    @Deprecated
     public static void deleteTempFiles() throws IOException {
         deleteFile(TMP);
     }
@@ -94,6 +96,7 @@ public class TestFileUtils {
         return false;
     }
 
+    @Deprecated
     public static boolean mkdirs(File directory) {
         if (directory == null) {
             return false;
@@ -117,10 +120,20 @@ public class TestFileUtils {
         return (parentDir != null && (mkdirs(parentDir) || parentDir.exists()) && canonDir.mkdir());
     }
 
+    /**
+     * @throws IOException if an I/O error occurs
+     * @deprecated use @TempDir (JUnit 5) Or TemporaryFolder (JUnit 4) instead
+     */
+    @Deprecated
     public static File createTempFile(String contents) throws IOException {
         return createTempFile(contents.getBytes(StandardCharsets.UTF_8), 1);
     }
 
+    @Deprecated
+    /**
+     * @throws IOException if an I/O error occurs
+     * @deprecated use @TempDir (JUnit 5) Or TemporaryFolder (JUnit 4) instead
+     */
     public static File createTempFile(byte[] pattern, int repeat) throws IOException {
         mkdirs(TMP);
         File tmpFile = File.createTempFile("tmpfile-", ".data", TMP);
@@ -128,10 +141,26 @@ public class TestFileUtils {
         return tmpFile;
     }
 
+    /**
+     * Creates a temporary directory.
+     *
+     * @return the temporary directory
+     * @throws IOException if an I/O error occurs
+     * @deprecated use @TempDir (JUnit 5) Or TemporaryFolder (JUnit 4) instead
+     */
+    @Deprecated
     public static File createTempDir() throws IOException {
         return createTempDir("");
     }
 
+    /**
+     * Creates a temporary directory.
+     *
+     * @return the temporary directory
+     * @throws IOException if an I/O error occurs
+     * @deprecated use {@code @TempDir} (JUnit 5) or {@code TemporaryFolder} (JUnit 4) instead
+     */
+    @Deprecated
     public static File createTempDir(String suffix) throws IOException {
         mkdirs(TMP);
         File tmpFile = File.createTempFile("tmpdir-", suffix, TMP);
@@ -189,6 +218,15 @@ public class TestFileUtils {
         return total;
     }
 
+    /**
+     * Reads the contents of a file into a byte array.
+     *
+     * @param file the file to read
+     * @return the contents of the file as a byte array
+     * @throws IOException if an I/O error occurs
+     * @deprecated use {@code Files.readAllBytes(Path)} instead
+     */
+    @Deprecated
     public static byte[] readBytes(File file) throws IOException {
         RandomAccessFile in = null;
         try {
@@ -209,6 +247,7 @@ public class TestFileUtils {
         }
     }
 
+    @Deprecated
     public static void writeBytes(File file, byte[] pattern, int repeat) throws IOException {
         file.deleteOnExit();
         file.getParentFile().mkdirs();
@@ -232,14 +271,16 @@ public class TestFileUtils {
     }
 
     public static String readString(File file) throws IOException {
-        byte[] content = readBytes(file);
+        byte[] content = Files.readAllBytes(file.toPath());
         return new String(content, StandardCharsets.UTF_8);
     }
 
+    @Deprecated
     public static void writeString(File file, String content) throws IOException {
         writeBytes(file, content.getBytes(StandardCharsets.UTF_8), 1);
     }
 
+    @Deprecated
     public static void writeString(File file, String content, long timestamp) throws IOException {
         writeBytes(file, content.getBytes(StandardCharsets.UTF_8), 1);
         file.setLastModified(timestamp);

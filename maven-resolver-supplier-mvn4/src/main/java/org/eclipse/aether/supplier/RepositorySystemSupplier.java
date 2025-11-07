@@ -18,8 +18,10 @@
  */
 package org.eclipse.aether.supplier;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
@@ -54,6 +56,7 @@ import org.eclipse.aether.impl.RemoteRepositoryManager;
 import org.eclipse.aether.impl.RepositoryConnectorProvider;
 import org.eclipse.aether.impl.RepositoryEventDispatcher;
 import org.eclipse.aether.impl.RepositorySystemLifecycle;
+import org.eclipse.aether.impl.RepositorySystemValidator;
 import org.eclipse.aether.impl.UpdateCheckManager;
 import org.eclipse.aether.impl.UpdatePolicyAnalyzer;
 import org.eclipse.aether.impl.VersionRangeResolver;
@@ -76,6 +79,7 @@ import org.eclipse.aether.internal.impl.DefaultRepositoryEventDispatcher;
 import org.eclipse.aether.internal.impl.DefaultRepositoryLayoutProvider;
 import org.eclipse.aether.internal.impl.DefaultRepositorySystem;
 import org.eclipse.aether.internal.impl.DefaultRepositorySystemLifecycle;
+import org.eclipse.aether.internal.impl.DefaultRepositorySystemValidator;
 import org.eclipse.aether.internal.impl.DefaultTrackingFileManager;
 import org.eclipse.aether.internal.impl.DefaultTransporterProvider;
 import org.eclipse.aether.internal.impl.DefaultUpdateCheckManager;
@@ -99,8 +103,10 @@ import org.eclipse.aether.internal.impl.collect.DependencyCollectorDelegate;
 import org.eclipse.aether.internal.impl.collect.bf.BfDependencyCollector;
 import org.eclipse.aether.internal.impl.collect.df.DfDependencyCollector;
 import org.eclipse.aether.internal.impl.filter.DefaultRemoteRepositoryFilterManager;
+import org.eclipse.aether.internal.impl.filter.FilteringPipelineRepositoryConnectorFactory;
 import org.eclipse.aether.internal.impl.filter.GroupIdRemoteRepositoryFilterSource;
 import org.eclipse.aether.internal.impl.filter.PrefixesRemoteRepositoryFilterSource;
+import org.eclipse.aether.internal.impl.offline.OfflinePipelineRepositoryConnectorFactory;
 import org.eclipse.aether.internal.impl.resolution.TrustedChecksumsArtifactResolverPostProcessor;
 import org.eclipse.aether.internal.impl.synccontext.DefaultSyncContextFactory;
 import org.eclipse.aether.internal.impl.synccontext.named.NameMapper;
@@ -121,6 +127,7 @@ import org.eclipse.aether.spi.artifact.generator.ArtifactGeneratorFactory;
 import org.eclipse.aether.spi.artifact.transformer.ArtifactTransformer;
 import org.eclipse.aether.spi.checksums.ProvidedChecksumsSource;
 import org.eclipse.aether.spi.checksums.TrustedChecksumsSource;
+import org.eclipse.aether.spi.connector.PipelineRepositoryConnectorFactory;
 import org.eclipse.aether.spi.connector.RepositoryConnectorFactory;
 import org.eclipse.aether.spi.connector.checksum.ChecksumAlgorithmFactory;
 import org.eclipse.aether.spi.connector.checksum.ChecksumAlgorithmFactorySelector;
@@ -137,6 +144,7 @@ import org.eclipse.aether.spi.io.PathProcessor;
 import org.eclipse.aether.spi.localrepo.LocalRepositoryManagerFactory;
 import org.eclipse.aether.spi.resolution.ArtifactResolverPostProcessor;
 import org.eclipse.aether.spi.synccontext.SyncContextFactory;
+import org.eclipse.aether.spi.validator.ValidatorFactory;
 import org.eclipse.aether.transport.apache.ApacheTransporterFactory;
 import org.eclipse.aether.transport.file.FileTransporterFactory;
 import org.eclipse.aether.util.version.GenericVersionScheme;
@@ -515,10 +523,11 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
         HashMap<String, RemoteRepositoryFilterSource> result = new HashMap<>();
         result.put(
                 GroupIdRemoteRepositoryFilterSource.NAME,
-                new GroupIdRemoteRepositoryFilterSource(getRepositorySystemLifecycle()));
+                new GroupIdRemoteRepositoryFilterSource(getRepositorySystemLifecycle(), getPathProcessor()));
         result.put(
                 PrefixesRemoteRepositoryFilterSource.NAME,
-                new PrefixesRemoteRepositoryFilterSource(getRepositoryLayoutProvider()));
+                new PrefixesRemoteRepositoryFilterSource(
+                        this::getMetadataResolver, this::getRemoteRepositoryManager, getRepositoryLayoutProvider()));
         return result;
     }
 
@@ -581,7 +590,8 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
                 new SparseDirectoryTrustedChecksumsSource(getChecksumProcessor(), getLocalPathComposer()));
         result.put(
                 SummaryFileTrustedChecksumsSource.NAME,
-                new SummaryFileTrustedChecksumsSource(getLocalPathComposer(), getRepositorySystemLifecycle()));
+                new SummaryFileTrustedChecksumsSource(
+                        getLocalPathComposer(), getRepositorySystemLifecycle(), getPathProcessor()));
         return result;
     }
 
@@ -682,6 +692,7 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
                 getTransporterProvider(),
                 getRepositoryLayoutProvider(),
                 getChecksumPolicyProvider(),
+                getPathProcessor(),
                 getChecksumProcessor(),
                 getProvidedChecksumsSources());
     }
@@ -702,6 +713,27 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
         return result;
     }
 
+    private Map<String, PipelineRepositoryConnectorFactory> pipelineRepositoryConnectorFactories;
+
+    public final Map<String, PipelineRepositoryConnectorFactory> getPipelineRepositoryConnectorFactories() {
+        checkClosed();
+        if (pipelineRepositoryConnectorFactories == null) {
+            pipelineRepositoryConnectorFactories = createPipelineRepositoryConnectorFactories();
+        }
+        return pipelineRepositoryConnectorFactories;
+    }
+
+    protected Map<String, PipelineRepositoryConnectorFactory> createPipelineRepositoryConnectorFactories() {
+        HashMap<String, PipelineRepositoryConnectorFactory> result = new HashMap<>();
+        result.put(
+                FilteringPipelineRepositoryConnectorFactory.NAME,
+                new FilteringPipelineRepositoryConnectorFactory(getRemoteRepositoryFilterManager()));
+        result.put(
+                OfflinePipelineRepositoryConnectorFactory.NAME,
+                new OfflinePipelineRepositoryConnectorFactory(getOfflineController()));
+        return result;
+    }
+
     private RepositoryConnectorProvider repositoryConnectorProvider;
 
     public final RepositoryConnectorProvider getRepositoryConnectorProvider() {
@@ -714,7 +746,7 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
 
     protected RepositoryConnectorProvider createRepositoryConnectorProvider() {
         return new DefaultRepositoryConnectorProvider(
-                getRepositoryConnectorFactories(), getRemoteRepositoryFilterManager());
+                getRepositoryConnectorFactories(), getPipelineRepositoryConnectorFactories());
     }
 
     private Installer installer;
@@ -1056,6 +1088,34 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
         return new DefaultModelCacheFactory();
     }
 
+    private List<ValidatorFactory> validatorFactories;
+
+    public final List<ValidatorFactory> getValidatorFactories() {
+        checkClosed();
+        if (validatorFactories == null) {
+            validatorFactories = createValidatorFactories();
+        }
+        return validatorFactories;
+    }
+
+    protected List<ValidatorFactory> createValidatorFactories() {
+        return new ArrayList<>();
+    }
+
+    private RepositorySystemValidator repositorySystemValidator;
+
+    public final RepositorySystemValidator getRepositorySystemValidator() {
+        checkClosed();
+        if (repositorySystemValidator == null) {
+            repositorySystemValidator = createRepositorySystemValidator();
+        }
+        return repositorySystemValidator;
+    }
+
+    protected RepositorySystemValidator createRepositorySystemValidator() {
+        return new DefaultRepositorySystemValidator(getValidatorFactories());
+    }
+
     private RepositorySystem repositorySystem;
 
     public final RepositorySystem getRepositorySystem() {
@@ -1080,7 +1140,8 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
                 getSyncContextFactory(),
                 getRemoteRepositoryManager(),
                 getRepositorySystemLifecycle(),
-                getArtifactDecoratorFactories());
+                getArtifactDecoratorFactories(),
+                getRepositorySystemValidator());
     }
 
     @Override

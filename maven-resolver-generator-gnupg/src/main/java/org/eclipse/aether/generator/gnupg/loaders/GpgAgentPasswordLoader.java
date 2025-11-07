@@ -57,7 +57,6 @@ import static org.eclipse.aether.generator.gnupg.GnupgConfigurationKeys.DEFAULT_
 @Singleton
 @Named(GpgAgentPasswordLoader.NAME)
 @Priority(10)
-@SuppressWarnings("checkstyle:magicnumber")
 public final class GpgAgentPasswordLoader implements GnupgSignatureArtifactGeneratorFactory.Loader {
     public static final String NAME = "agent";
     private final Logger logger = LoggerFactory.getLogger(getClass());
@@ -72,7 +71,7 @@ public final class GpgAgentPasswordLoader implements GnupgSignatureArtifactGener
         boolean interactive = ConfigUtils.getBoolean(
                 session, ConfigurationProperties.DEFAULT_INTERACTIVE, ConfigurationProperties.INTERACTIVE);
         List<String> socketLocations = Arrays.stream(socketLocationsStr.split(","))
-                .filter(s -> s != null && !s.isEmpty())
+                .filter(s -> !s.isEmpty())
                 .collect(Collectors.toList());
         for (String socketLocation : socketLocations) {
             try {

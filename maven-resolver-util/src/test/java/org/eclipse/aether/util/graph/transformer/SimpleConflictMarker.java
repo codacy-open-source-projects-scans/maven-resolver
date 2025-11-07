@@ -35,13 +35,14 @@ import static java.util.Objects.requireNonNull;
  */
 class SimpleConflictMarker implements DependencyGraphTransformer {
 
+    @Override
     public DependencyNode transformGraph(DependencyNode node, DependencyGraphTransformationContext context)
             throws RepositoryException {
         requireNonNull(node, "node cannot be null");
         requireNonNull(context, "context cannot be null");
         @SuppressWarnings("unchecked")
-        Map<DependencyNode, Object> conflictIds =
-                (Map<DependencyNode, Object>) context.get(TransformationContextKeys.CONFLICT_IDS);
+        Map<DependencyNode, String> conflictIds =
+                (Map<DependencyNode, String>) context.get(TransformationContextKeys.CONFLICT_IDS);
         if (conflictIds == null) {
             conflictIds = new IdentityHashMap<>();
             context.put(TransformationContextKeys.CONFLICT_IDS, conflictIds);
@@ -52,7 +53,7 @@ class SimpleConflictMarker implements DependencyGraphTransformer {
         return node;
     }
 
-    private void mark(DependencyNode node, Map<DependencyNode, Object> conflictIds) {
+    private void mark(DependencyNode node, Map<DependencyNode, String> conflictIds) {
         Dependency dependency = node.getDependency();
         if (dependency != null) {
             Artifact artifact = dependency.getArtifact();

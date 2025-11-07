@@ -78,7 +78,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * Common set of tests against Http transporter.
  */
-@SuppressWarnings({"checkstyle:MagicNumber", "checkstyle:MethodName"})
+@SuppressWarnings({"checkstyle:MethodName"})
 public class HttpTransporterTest {
 
     protected static final Path KEY_STORE_PATH = Paths.get("target/keystore");
@@ -184,6 +184,7 @@ public class HttpTransporterTest {
         factory = transporterFactorySupplier.get();
         repoDir = TestFileUtils.createTempDir();
         TestFileUtils.writeString(new File(repoDir, "file.txt"), "test");
+        TestFileUtils.writeString(new File(repoDir, "artifact.pom"), "<xml>pom</xml>");
         TestFileUtils.writeString(new File(repoDir, "dir/file.txt"), "test");
         TestFileUtils.writeString(new File(repoDir, "dir/oldFile.txt"), "oldTest", OLD_FILE_TIMESTAMP);
         TestFileUtils.writeString(new File(repoDir, "empty.txt"), "");
@@ -388,7 +389,18 @@ public class HttpTransporterTest {
         assertEquals(1, listener.getStartedCount());
         assertTrue(listener.getProgressedCount() > 0, "Count: " + listener.getProgressedCount());
         assertEquals("oldTest", listener.getBaos().toString(StandardCharsets.UTF_8));
-        assertEquals(file.lastModified(), OLD_FILE_TIMESTAMP);
+        assertEquals(OLD_FILE_TIMESTAMP, file.lastModified());
+    }
+
+    @Test
+    protected void testGet_CompressionUsedWithPom() throws Exception {
+        File file = TestFileUtils.createTempFile("pom");
+        GetTask task = new GetTask(URI.create("repo/artifact.pom")).setDataPath(file.toPath());
+        transporter.get(task);
+        String acceptEncoding = httpServer.getLogEntries().get(0).getHeaders().get("Accept-Encoding");
+        assertNotNull(acceptEncoding, "Missing Accept-Encoding header when retrieving pom");
+        // support either gzip or deflate as the transporter implementation may vary
+        assertTrue(acceptEncoding.contains("gzip") || acceptEncoding.contains("deflate"));
     }
 
     @Test
@@ -487,10 +499,12 @@ public class HttpTransporterTest {
         } catch (HttpRFC9457Exception e) {
             assertEquals(403, e.getStatusCode());
             assertEquals(e.getPayload().getType(), URI.create("https://example.com/probs/out-of-credit"));
-            assertEquals(e.getPayload().getStatus(), 403);
-            assertEquals(e.getPayload().getTitle(), "You do not have enough credit.");
-            assertEquals(e.getPayload().getDetail(), "Your current balance is 30, but that costs 50.");
-            assertEquals(e.getPayload().getInstance(), URI.create("/account/12345/msgs/abc"));
+            assertEquals(403, e.getPayload().getStatus());
+            assertEquals("You do not have enough credit.", e.getPayload().getTitle());
+            assertEquals(
+                    "Your current balance is 30, but that costs 50.",
+                    e.getPayload().getDetail());
+            assertEquals(URI.create("/account/12345/msgs/abc"), e.getPayload().getInstance());
         }
     }
 

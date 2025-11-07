@@ -35,11 +35,24 @@ import static java.util.Objects.requireNonNull;
  * A utility class to write files.
  *
  * @since 1.9.0
+ * @deprecated Do not use this class; is not used in Resolver (see corresponding processor components in {@code org.eclipse.aether.spi.io} package).
  */
+@Deprecated
 public final class FileUtils {
-    // Logic borrowed from Commons-Lang3: we really need only this, to decide do we "atomic move" or not
+    /**
+     * Logic borrowed from Commons-Lang3: we really need only this, to decide do we NIO2 file ops or not.
+     * For some reason non-NIO2 works better on Windows.
+     */
     private static final boolean IS_WINDOWS =
             System.getProperty("os.name", "unknown").startsWith("Windows");
+
+    /**
+     * Escape hatch if atomic move is not desired on system we run on.
+     *
+     * @since 2.0.12
+     */
+    private static final boolean ATOMIC_MOVE =
+            Boolean.parseBoolean(System.getProperty(FileUtils.class.getName() + "ATOMIC_MOVE", "true"));
 
     private FileUtils() {
         // hide constructor
@@ -115,6 +128,9 @@ public final class FileUtils {
                 + Long.toUnsignedString(ThreadLocalRandom.current().nextLong()) + ".tmp");
         return new CollocatedTempFile() {
             private final AtomicBoolean wantsMove = new AtomicBoolean(false);
+            private final StandardCopyOption[] copyOption = FileUtils.ATOMIC_MOVE
+                    ? new StandardCopyOption[] {StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING}
+                    : new StandardCopyOption[] {StandardCopyOption.REPLACE_EXISTING};
 
             @Override
             public Path getPath() {
@@ -132,7 +148,7 @@ public final class FileUtils {
                     if (IS_WINDOWS) {
                         copy(tempFile, file);
                     } else {
-                        Files.move(tempFile, file, StandardCopyOption.REPLACE_EXISTING);
+                        Files.move(tempFile, file, copyOption);
                     }
                 }
                 Files.deleteIfExists(tempFile);
@@ -171,9 +187,9 @@ public final class FileUtils {
     /**
      * Writes file without backup.
      *
-     * @param target that is the target file (must be file, the path must have parent).
-     * @param writer the writer that will accept a {@link Path} to write content to.
-     * @throws IOException if at any step IO problem occurs.
+     * @param target that is the target file (must be file, the path must have parent)
+     * @param writer the writer that will accept a {@link Path} to write content to
+     * @throws IOException if at any step IO problem occurs
      */
     public static void writeFile(Path target, FileWriter writer) throws IOException {
         writeFile(target, writer, false);
@@ -182,9 +198,9 @@ public final class FileUtils {
     /**
      * Writes file with backup copy (appends ".bak" extension).
      *
-     * @param target that is the target file (must be file, the path must have parent).
-     * @param writer the writer that will accept a {@link Path} to write content to.
-     * @throws IOException if at any step IO problem occurs.
+     * @param target that is the target file (must be file, the path must have parent)
+     * @param writer the writer that will accept a {@link Path} to write content to
+     * @throws IOException if at any step IO problem occurs
      */
     public static void writeFileWithBackup(Path target, FileWriter writer) throws IOException {
         writeFile(target, writer, true);
@@ -192,14 +208,14 @@ public final class FileUtils {
 
     /**
      * Utility method to write out file to disk in "atomic" manner, with optional backups (".bak") if needed. This
-     * ensures that no other thread or process will be able to read not fully written files. Finally, this methos
+     * ensures that no other thread or process will be able to read not fully written files. Finally, this method
      * may create the needed parent directories, if the passed in target parents does not exist.
      *
-     * @param target   that is the target file (must be an existing or non-existing file, the path must have parent).
-     * @param writer   the writer that will accept a {@link Path} to write content to.
+     * @param target   that is the target file (must be an existing or non-existing file, the path must have parent)
+     * @param writer   the writer that will accept a {@link Path} to write content to
      * @param doBackup if {@code true}, and target file is about to be overwritten, a ".bak" file with old contents will
-     *                 be created/overwritten.
-     * @throws IOException if at any step IO problem occurs.
+     *                 be created/overwritten
+     * @throws IOException if at any step IO problem occurs
      */
     private static void writeFile(Path target, FileWriter writer, boolean doBackup) throws IOException {
         requireNonNull(target, "target is null");

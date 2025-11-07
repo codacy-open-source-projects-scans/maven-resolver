@@ -30,6 +30,7 @@ import org.eclipse.aether.internal.impl.DefaultRepositorySystemLifecycle;
 import org.eclipse.aether.repository.RemoteRepository;
 import org.eclipse.aether.resolution.ArtifactRequest;
 import org.eclipse.aether.resolution.ArtifactResult;
+import org.eclipse.aether.spi.io.PathProcessorSupport;
 
 /**
  * UT for {@link GroupIdRemoteRepositoryFilterSource}.
@@ -40,14 +41,15 @@ public class GroupIdRemoteRepositoryFilterSourceTest extends RemoteRepositoryFil
     @Override
     protected GroupIdRemoteRepositoryFilterSource getRemoteRepositoryFilterSource(
             DefaultRepositorySystemSession session, RemoteRepository remoteRepository) {
-        return groupIdRemoteRepositoryFilterSource =
-                new GroupIdRemoteRepositoryFilterSource(new DefaultRepositorySystemLifecycle());
+        return groupIdRemoteRepositoryFilterSource = new GroupIdRemoteRepositoryFilterSource(
+                new DefaultRepositorySystemLifecycle(), new PathProcessorSupport());
     }
 
     @Override
-    protected void enableSource(DefaultRepositorySystemSession session) {
+    protected void enableSource(DefaultRepositorySystemSession session, boolean enabled) {
         session.setConfigProperty(
-                "aether.remoteRepositoryFilter." + GroupIdRemoteRepositoryFilterSource.NAME, Boolean.TRUE.toString());
+                "aether.remoteRepositoryFilter." + GroupIdRemoteRepositoryFilterSource.NAME,
+                Boolean.valueOf(enabled).toString());
     }
 
     protected void allowArtifact(
@@ -61,7 +63,7 @@ public class GroupIdRemoteRepositoryFilterSourceTest extends RemoteRepositoryFil
             artifactResult.setArtifact(resolvedArtifact);
             artifactResult.setRepository(remoteRepository);
             List<ArtifactResult> artifactResults = Collections.singletonList(artifactResult);
-            enableSource(newSession);
+            enableSource(newSession, true);
             newSession.setConfigProperty(
                     "aether.remoteRepositoryFilter." + GroupIdRemoteRepositoryFilterSource.NAME + ".record",
                     Boolean.TRUE.toString());

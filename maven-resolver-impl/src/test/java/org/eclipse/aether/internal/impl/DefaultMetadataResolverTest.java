@@ -48,11 +48,16 @@ import org.eclipse.aether.transfer.MetadataNotFoundException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- */
 public class DefaultMetadataResolverTest {
 
     private DefaultMetadataResolver resolver;
@@ -75,6 +80,9 @@ public class DefaultMetadataResolverTest {
 
     private RecordingRepositoryListener listener;
 
+    @TempDir
+    private File tempDirectory;
+
     @BeforeEach
     void setup() throws Exception {
         remoteRepositoryFilterSources = new HashMap<>();
@@ -93,9 +101,7 @@ public class DefaultMetadataResolverTest {
                 remoteRepositoryFilterManager,
                 new DefaultPathProcessor());
         repository = new RemoteRepository.Builder(
-                        "test-DMRT",
-                        "default",
-                        TestFileUtils.createTempDir().toURI().toURL().toString())
+                        "test-DMRT", "default", tempDirectory.toURI().toURL().toString())
                 .build();
         metadata = new DefaultMetadata("gid", "aid", "ver", "maven-metadata.xml", Metadata.Nature.RELEASE_OR_SNAPSHOT);
         connector = new RecordingRepositoryConnector();
@@ -120,11 +126,8 @@ public class DefaultMetadataResolverTest {
 
         MetadataResult result = results.get(0);
         assertSame(request, result.getRequest());
-        assertNotNull(
-                result.getException(),
-                "" + (result.getMetadata() != null ? result.getMetadata().getFile() : result.getMetadata()));
+        assertNotNull(result.getException());
         assertEquals(MetadataNotFoundException.class, result.getException().getClass());
-
         assertNull(result.getMetadata());
     }
 
@@ -336,7 +339,7 @@ public class DefaultMetadataResolverTest {
         MetadataResult result = results.get(0);
         assertSame(request, result.getRequest());
         assertNotNull(result.getException());
-        assertTrue(result.getException() instanceof MetadataNotFoundException);
+        assertInstanceOf(MetadataNotFoundException.class, result.getException());
         assertEquals("never-accept", result.getException().getMessage());
         assertNull(result.getMetadata());
 
@@ -396,7 +399,7 @@ public class DefaultMetadataResolverTest {
         MetadataResult result = results.get(0);
         assertSame(request, result.getRequest());
         assertNotNull(result.getException());
-        assertTrue(result.getException() instanceof MetadataNotFoundException);
+        assertInstanceOf(MetadataNotFoundException.class, result.getException());
         assertEquals("never-accept-" + repository.getId(), result.getException().getMessage());
         assertNull(result.getMetadata());
 

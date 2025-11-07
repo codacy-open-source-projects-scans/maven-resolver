@@ -18,9 +18,12 @@
  */
 package org.eclipse.aether.internal.impl;
 
+import java.util.function.Function;
+
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.metadata.Metadata;
+import org.eclipse.aether.repository.ArtifactRepository;
 import org.eclipse.aether.repository.RemoteRepository;
 import org.eclipse.aether.util.ConfigUtils;
 
@@ -145,41 +148,76 @@ public abstract class LocalPathPrefixComposerFactorySupport implements LocalPath
 
     public static final String DEFAULT_SNAPSHOTS_PREFIX = "snapshots";
 
+    // Legacy support: properties were renamed in Resolver 2.0.x, but we should support 1.9.x properties as well
+    // These below are Resolver 1.9.x properties, are undocumented and shall be removed with Resolver 2.1.x (or later).
+
+    private static final String R1_CONF_PROP_SPLIT = "aether.enhancedLocalRepository.split";
+
+    private static final String R1_CONF_PROP_LOCAL_PREFIX = "aether.enhancedLocalRepository.localPrefix";
+
+    private static final String R1_CONF_PROP_SPLIT_LOCAL = "aether.enhancedLocalRepository.splitLocal";
+
+    private static final String R1_CONF_PROP_REMOTE_PREFIX = "aether.enhancedLocalRepository.remotePrefix";
+
+    private static final String R1_CONF_PROP_SPLIT_REMOTE = "aether.enhancedLocalRepository.splitRemote";
+
+    private static final String R1_CONF_PROP_SPLIT_REMOTE_REPOSITORY =
+            "aether.enhancedLocalRepository.splitRemoteRepository";
+
+    private static final String R1_CONF_PROP_SPLIT_REMOTE_REPOSITORY_LAST =
+            "aether.enhancedLocalRepository.splitRemoteRepositoryLast";
+
+    private static final String R1_CONF_PROP_RELEASES_PREFIX = "aether.enhancedLocalRepository.releasesPrefix";
+
+    private static final String R1_CONF_PROP_SNAPSHOTS_PREFIX = "aether.enhancedLocalRepository.snapshotsPrefix";
+
     protected boolean isSplit(RepositorySystemSession session) {
-        return ConfigUtils.getBoolean(session, DEFAULT_SPLIT, CONFIG_PROP_SPLIT);
+        return ConfigUtils.getBoolean(session, DEFAULT_SPLIT, CONFIG_PROP_SPLIT, R1_CONF_PROP_SPLIT);
     }
 
     protected String getLocalPrefix(RepositorySystemSession session) {
-        return ConfigUtils.getString(session, DEFAULT_LOCAL_PREFIX, CONFIG_PROP_LOCAL_PREFIX);
+        return ConfigUtils.getString(
+                session, DEFAULT_LOCAL_PREFIX, CONFIG_PROP_LOCAL_PREFIX, R1_CONF_PROP_LOCAL_PREFIX);
     }
 
     protected boolean isSplitLocal(RepositorySystemSession session) {
-        return ConfigUtils.getBoolean(session, DEFAULT_SPLIT_LOCAL, CONFIG_PROP_SPLIT_LOCAL);
+        return ConfigUtils.getBoolean(session, DEFAULT_SPLIT_LOCAL, CONFIG_PROP_SPLIT_LOCAL, R1_CONF_PROP_SPLIT_LOCAL);
     }
 
     protected String getRemotePrefix(RepositorySystemSession session) {
-        return ConfigUtils.getString(session, DEFAULT_REMOTE_PREFIX, CONFIG_PROP_REMOTE_PREFIX);
+        return ConfigUtils.getString(
+                session, DEFAULT_REMOTE_PREFIX, CONFIG_PROP_REMOTE_PREFIX, R1_CONF_PROP_REMOTE_PREFIX);
     }
 
     protected boolean isSplitRemote(RepositorySystemSession session) {
-        return ConfigUtils.getBoolean(session, DEFAULT_SPLIT_REMOTE, CONFIG_PROP_SPLIT_REMOTE);
+        return ConfigUtils.getBoolean(
+                session, DEFAULT_SPLIT_REMOTE, CONFIG_PROP_SPLIT_REMOTE, R1_CONF_PROP_SPLIT_REMOTE);
     }
 
     protected boolean isSplitRemoteRepository(RepositorySystemSession session) {
-        return ConfigUtils.getBoolean(session, DEFAULT_SPLIT_REMOTE_REPOSITORY, CONFIG_PROP_SPLIT_REMOTE_REPOSITORY);
+        return ConfigUtils.getBoolean(
+                session,
+                DEFAULT_SPLIT_REMOTE_REPOSITORY,
+                CONFIG_PROP_SPLIT_REMOTE_REPOSITORY,
+                R1_CONF_PROP_SPLIT_REMOTE_REPOSITORY);
     }
 
     protected boolean isSplitRemoteRepositoryLast(RepositorySystemSession session) {
         return ConfigUtils.getBoolean(
-                session, DEFAULT_SPLIT_REMOTE_REPOSITORY_LAST, CONFIG_PROP_SPLIT_REMOTE_REPOSITORY_LAST);
+                session,
+                DEFAULT_SPLIT_REMOTE_REPOSITORY_LAST,
+                CONFIG_PROP_SPLIT_REMOTE_REPOSITORY_LAST,
+                R1_CONF_PROP_SPLIT_REMOTE_REPOSITORY_LAST);
     }
 
     protected String getReleasesPrefix(RepositorySystemSession session) {
-        return ConfigUtils.getString(session, DEFAULT_RELEASES_PREFIX, CONFIG_PROP_RELEASES_PREFIX);
+        return ConfigUtils.getString(
+                session, DEFAULT_RELEASES_PREFIX, CONFIG_PROP_RELEASES_PREFIX, R1_CONF_PROP_RELEASES_PREFIX);
     }
 
     protected String getSnapshotsPrefix(RepositorySystemSession session) {
-        return ConfigUtils.getString(session, DEFAULT_SNAPSHOTS_PREFIX, CONFIG_PROP_SNAPSHOTS_PREFIX);
+        return ConfigUtils.getString(
+                session, DEFAULT_SNAPSHOTS_PREFIX, CONFIG_PROP_SNAPSHOTS_PREFIX, R1_CONF_PROP_SNAPSHOTS_PREFIX);
     }
 
     /**
@@ -206,6 +244,8 @@ public abstract class LocalPathPrefixComposerFactorySupport implements LocalPath
 
         protected final String snapshotsPrefix;
 
+        protected final Function<ArtifactRepository, String> idToPathSegmentFunction;
+
         protected LocalPathPrefixComposerSupport(
                 boolean split,
                 String localPrefix,
@@ -215,7 +255,8 @@ public abstract class LocalPathPrefixComposerFactorySupport implements LocalPath
                 boolean splitRemoteRepository,
                 boolean splitRemoteRepositoryLast,
                 String releasesPrefix,
-                String snapshotsPrefix) {
+                String snapshotsPrefix,
+                Function<ArtifactRepository, String> idToPathSegmentFunction) {
             this.split = split;
             this.localPrefix = localPrefix;
             this.splitLocal = splitLocal;
@@ -225,6 +266,7 @@ public abstract class LocalPathPrefixComposerFactorySupport implements LocalPath
             this.splitRemoteRepositoryLast = splitRemoteRepositoryLast;
             this.releasesPrefix = releasesPrefix;
             this.snapshotsPrefix = snapshotsPrefix;
+            this.idToPathSegmentFunction = idToPathSegmentFunction;
         }
 
         @Override
@@ -246,13 +288,13 @@ public abstract class LocalPathPrefixComposerFactorySupport implements LocalPath
             }
             String result = remotePrefix;
             if (!splitRemoteRepositoryLast && splitRemoteRepository) {
-                result += "/" + repository.getId();
+                result += "/" + idToPathSegmentFunction.apply(repository);
             }
             if (splitRemote) {
                 result += "/" + (artifact.isSnapshot() ? snapshotsPrefix : releasesPrefix);
             }
             if (splitRemoteRepositoryLast && splitRemoteRepository) {
-                result += "/" + repository.getId();
+                result += "/" + idToPathSegmentFunction.apply(repository);
             }
             return result;
         }
@@ -276,13 +318,13 @@ public abstract class LocalPathPrefixComposerFactorySupport implements LocalPath
             }
             String result = remotePrefix;
             if (!splitRemoteRepositoryLast && splitRemoteRepository) {
-                result += "/" + repository.getId();
+                result += "/" + idToPathSegmentFunction.apply(repository);
             }
             if (splitRemote) {
                 result += "/" + (isSnapshot(metadata) ? snapshotsPrefix : releasesPrefix);
             }
             if (splitRemoteRepositoryLast && splitRemoteRepository) {
-                result += "/" + repository.getId();
+                result += "/" + idToPathSegmentFunction.apply(repository);
             }
             return result;
         }

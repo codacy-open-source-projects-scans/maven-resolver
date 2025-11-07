@@ -34,12 +34,12 @@ import org.eclipse.aether.spi.connector.transport.GetTask;
 import org.eclipse.aether.spi.connector.transport.PeekTask;
 import org.eclipse.aether.spi.connector.transport.PutTask;
 import org.eclipse.aether.spi.connector.transport.Transporter;
+import org.eclipse.aether.spi.io.PathProcessor;
+import org.eclipse.aether.spi.io.PathProcessorSupport;
 import org.eclipse.aether.transfer.NoTransporterException;
 import org.eclipse.aether.transport.minio.internal.RepositoryIdObjectNameMapperFactory;
-import org.eclipse.aether.util.FileUtils;
 import org.eclipse.aether.util.repository.AuthenticationBuilder;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.MinIOContainer;
@@ -59,41 +59,40 @@ class MinioTransporterIT {
     private static final String OBJECT_NAME = "dir/file.txt";
     private static final String OBJECT_CONTENT = "content";
 
+    private PathProcessor pathProcessor;
     private MinIOContainer minioContainer;
-    private MinioClient minioClient;
     private RepositorySystemSession session;
-    private RemoteRepository repository;
     private ObjectNameMapperFactory objectNameMapperFactory;
 
     @BeforeEach
     void startSuite() throws Exception {
         Files.createDirectories(Paths.get(System.getProperty("java.io.tmpdir"))); // hack for Surefire
 
+        pathProcessor = new PathProcessorSupport();
         minioContainer = new MinIOContainer("minio/minio:latest");
         minioContainer.start();
-        minioClient = MinioClient.builder()
+        try (MinioClient minioClient = MinioClient.builder()
                 .endpoint(minioContainer.getS3URL())
                 .credentials(minioContainer.getUserName(), minioContainer.getPassword())
-                .build();
-
-        minioClient.makeBucket(MakeBucketArgs.builder().bucket(BUCKET_NAME).build());
-        try (FileUtils.TempFile tempFile = FileUtils.newTempFile()) {
-            Files.write(tempFile.getPath(), OBJECT_CONTENT.getBytes(StandardCharsets.UTF_8));
-            minioClient.uploadObject(UploadObjectArgs.builder()
-                    .bucket(BUCKET_NAME)
-                    .object(OBJECT_NAME)
-                    .filename(tempFile.getPath().toString())
-                    .build());
+                .build()) {
+            minioClient.makeBucket(MakeBucketArgs.builder().bucket(BUCKET_NAME).build());
+            try (PathProcessor.TempFile tempFile = pathProcessor.newTempFile()) {
+                Files.write(tempFile.getPath(), OBJECT_CONTENT.getBytes(StandardCharsets.UTF_8));
+                minioClient.uploadObject(UploadObjectArgs.builder()
+                        .bucket(BUCKET_NAME)
+                        .object(OBJECT_NAME)
+                        .filename(tempFile.getPath().toString())
+                        .build());
+            }
         }
 
         session = new DefaultRepositorySystemSession(h -> true);
-        repository = newRepo(RepositoryAuth.WITH);
         objectNameMapperFactory = new RepositoryIdObjectNameMapperFactory();
     }
 
     @AfterEach
-    public void stopSuite() {
-        minioContainer.start();
+    void stopSuite() {
+        minioContainer.stop();
     }
 
     enum RepositoryAuth {
@@ -120,41 +119,39 @@ class MinioTransporterIT {
     }
 
     @Test
-    void peekWithoutAuth() {
+    void peekWithoutAuth() throws NoTransporterException {
         try {
-            new MinioTransporter(session, newRepo(RepositoryAuth.WITHOUT), objectNameMapperFactory);
+            new MinioTransporter(session, newRepo(RepositoryAuth.WITHOUT), objectNameMapperFactory, pathProcessor);
             fail("Should throw");
-        } catch (NoTransporterException e) {
-            fail("Should not throw this");
         } catch (IllegalStateException e) {
             assertTrue(e.getMessage().contains("No accessKey and/or secretKey provided"));
         }
     }
 
     @Test
-    void peekWithWrongAuth() throws Exception {
+    void peekWithWrongAuth() throws NoTransporterException {
         try (MinioTransporter transporter =
-                new MinioTransporter(session, newRepo(RepositoryAuth.WRONG), objectNameMapperFactory)) {
+                new MinioTransporter(session, newRepo(RepositoryAuth.WRONG), objectNameMapperFactory, pathProcessor)) {
             try {
                 transporter.peek(new PeekTask(URI.create("test")));
                 fail("Should throw");
             } catch (Exception e) {
                 assertInstanceOf(ErrorResponseException.class, e);
-                assertEquals(transporter.classify(e), Transporter.ERROR_OTHER);
+                assertEquals(Transporter.ERROR_OTHER, transporter.classify(e));
             }
         }
     }
 
     @Test
-    void peekNonexistent() throws Exception {
+    void peekNonexistent() throws NoTransporterException {
         try (MinioTransporter transporter =
-                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory)) {
+                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory, pathProcessor)) {
             try {
                 transporter.peek(new PeekTask(URI.create("test")));
                 fail("Should throw");
             } catch (Exception e) {
                 assertInstanceOf(ErrorResponseException.class, e);
-                assertEquals(transporter.classify(e), Transporter.ERROR_NOT_FOUND);
+                assertEquals(Transporter.ERROR_NOT_FOUND, transporter.classify(e));
             }
         }
     }
@@ -162,25 +159,22 @@ class MinioTransporterIT {
     @Test
     void peekExistent() throws Exception {
         try (MinioTransporter transporter =
-                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory)) {
-            try {
-                transporter.peek(new PeekTask(URI.create(OBJECT_NAME)));
-            } catch (Exception e) {
-                Assertions.fail("Should not throw");
-            }
+                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory, pathProcessor)) {
+            transporter.peek(new PeekTask(URI.create(OBJECT_NAME)));
+            // Should not throw
         }
     }
 
     @Test
-    void getNonexistent() throws Exception {
+    void getNonexistent() throws NoTransporterException {
         try (MinioTransporter transporter =
-                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory)) {
+                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory, pathProcessor)) {
             try {
                 transporter.get(new GetTask(URI.create("test")));
                 fail("Should throw");
             } catch (Exception e) {
                 assertInstanceOf(ErrorResponseException.class, e);
-                assertEquals(transporter.classify(e), Transporter.ERROR_NOT_FOUND);
+                assertEquals(Transporter.ERROR_NOT_FOUND, transporter.classify(e));
             }
         }
     }
@@ -188,51 +182,39 @@ class MinioTransporterIT {
     @Test
     void getExistent() throws Exception {
         try (MinioTransporter transporter =
-                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory)) {
-            try {
-                GetTask task = new GetTask(URI.create(OBJECT_NAME));
-                transporter.get(task);
-                assertEquals(OBJECT_CONTENT, new String(task.getDataBytes(), StandardCharsets.UTF_8));
-            } catch (Exception e) {
-                Assertions.fail("Should not throw");
-            }
+                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory, pathProcessor)) {
+            GetTask task = new GetTask(URI.create(OBJECT_NAME));
+            transporter.get(task);
+            assertEquals(OBJECT_CONTENT, new String(task.getDataBytes(), StandardCharsets.UTF_8));
         }
     }
 
     @Test
     void putNonexistent() throws Exception {
         try (MinioTransporter transporter =
-                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory)) {
-            try {
-                URI uri = URI.create("test");
-                transporter.put(new PutTask(uri).setDataBytes(OBJECT_CONTENT.getBytes(StandardCharsets.UTF_8)));
-                GetTask task = new GetTask(uri);
-                transporter.get(task);
-                assertEquals(OBJECT_CONTENT, new String(task.getDataBytes(), StandardCharsets.UTF_8));
-            } catch (Exception e) {
-                Assertions.fail("Should not throw");
-            }
+                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory, pathProcessor)) {
+            URI uri = URI.create("test");
+            transporter.put(new PutTask(uri).setDataBytes(OBJECT_CONTENT.getBytes(StandardCharsets.UTF_8)));
+            GetTask task = new GetTask(uri);
+            transporter.get(task);
+            assertEquals(OBJECT_CONTENT, new String(task.getDataBytes(), StandardCharsets.UTF_8));
         }
     }
 
     @Test
     void putExistent() throws Exception {
         try (MinioTransporter transporter =
-                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory)) {
-            try {
-                URI uri = URI.create(OBJECT_NAME);
-                GetTask task = new GetTask(uri);
-                transporter.get(task);
-                assertEquals(OBJECT_CONTENT, new String(task.getDataBytes(), StandardCharsets.UTF_8));
+                new MinioTransporter(session, newRepo(RepositoryAuth.WITH), objectNameMapperFactory, pathProcessor)) {
+            URI uri = URI.create(OBJECT_NAME);
+            GetTask task = new GetTask(uri);
+            transporter.get(task);
+            assertEquals(OBJECT_CONTENT, new String(task.getDataBytes(), StandardCharsets.UTF_8));
 
-                String altContent = "altContent";
-                transporter.put(new PutTask(uri).setDataBytes(altContent.getBytes(StandardCharsets.UTF_8)));
-                task = new GetTask(uri);
-                transporter.get(task);
-                assertEquals(altContent, new String(task.getDataBytes(), StandardCharsets.UTF_8));
-            } catch (Exception e) {
-                Assertions.fail("Should not throw");
-            }
+            String altContent = "altContent";
+            transporter.put(new PutTask(uri).setDataBytes(altContent.getBytes(StandardCharsets.UTF_8)));
+            task = new GetTask(uri);
+            transporter.get(task);
+            assertEquals(altContent, new String(task.getDataBytes(), StandardCharsets.UTF_8));
         }
     }
 }

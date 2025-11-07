@@ -43,6 +43,7 @@ import org.eclipse.aether.util.repository.SimpleResolutionErrorPolicy;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -63,8 +64,7 @@ public class DefaultUpdateCheckManagerTest {
     private Artifact artifact;
 
     @BeforeEach
-    void setup() throws Exception {
-        File dir = TestFileUtils.createTempDir("");
+    void setup(@TempDir File dir) throws Exception {
         TestFileUtils.deleteFile(dir);
 
         File metadataFile = new File(dir, "metadata.txt");
@@ -230,7 +230,7 @@ public class DefaultUpdateCheckManagerTest {
         check = newMetadataCheck().setArtifactPolicy(RepositoryPolicy.UPDATE_POLICY_DAILY);
         manager.checkMetadata(session, check);
         assertFalse(check.isRequired());
-        assertTrue(check.getException() instanceof MetadataNotFoundException);
+        assertInstanceOf(MetadataNotFoundException.class, check.getException());
         assertTrue(check.getException().isFromCache());
     }
 
@@ -268,7 +268,7 @@ public class DefaultUpdateCheckManagerTest {
         session.setResolutionErrorPolicy(new SimpleResolutionErrorPolicy(false, true));
         manager.checkMetadata(session, check);
         assertFalse(check.isRequired());
-        assertTrue(check.getException() instanceof MetadataTransferException);
+        assertInstanceOf(MetadataTransferException.class, check.getException());
         assertTrue(check.getException().getMessage().contains("some error"), String.valueOf(check.getException()));
         assertTrue(check.getException().isFromCache());
     }
@@ -505,7 +505,7 @@ public class DefaultUpdateCheckManagerTest {
         UpdateCheck<Artifact, ArtifactTransferException> check = newArtifactCheck();
         long fifteenMinutes = new Date().getTime() - (15L * 60L * 1000L);
         check.getFile().setLastModified(fifteenMinutes);
-        // time is truncated on setLastModfied
+        // time is truncated on setLastModified
         fifteenMinutes = check.getFile().lastModified();
 
         // never checked before
@@ -555,7 +555,7 @@ public class DefaultUpdateCheckManagerTest {
         check = newArtifactCheck().setArtifactPolicy(RepositoryPolicy.UPDATE_POLICY_DAILY);
         manager.checkArtifact(session, check);
         assertFalse(check.isRequired());
-        assertTrue(check.getException() instanceof ArtifactNotFoundException);
+        assertInstanceOf(ArtifactNotFoundException.class, check.getException());
         assertTrue(check.getException().isFromCache());
     }
 
@@ -591,7 +591,7 @@ public class DefaultUpdateCheckManagerTest {
         session.setResolutionErrorPolicy(new SimpleResolutionErrorPolicy(false, true));
         manager.checkArtifact(session, check);
         assertFalse(check.isRequired());
-        assertTrue(check.getException() instanceof ArtifactTransferException);
+        assertInstanceOf(ArtifactTransferException.class, check.getException());
         assertTrue(check.getException().isFromCache());
     }
 

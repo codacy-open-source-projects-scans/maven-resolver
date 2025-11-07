@@ -30,6 +30,7 @@ import org.eclipse.aether.resolution.ArtifactDescriptorRequest;
 import org.eclipse.aether.resolution.ArtifactDescriptorResult;
 import org.eclipse.aether.util.graph.manager.DependencyManagerUtils;
 import org.eclipse.aether.util.graph.transformer.ChainedDependencyGraphTransformer;
+import org.eclipse.aether.util.graph.transformer.ClassicConflictResolver;
 import org.eclipse.aether.util.graph.transformer.ConfigurableVersionSelector;
 import org.eclipse.aether.util.graph.transformer.ConflictResolver;
 import org.eclipse.aether.util.graph.transformer.JavaDependencyContextRefiner;
@@ -53,12 +54,12 @@ public class GetDependencyHierarchyWithConflicts {
 
         // incompatible versions: two incompatible versions present in graph
         try (RepositorySystem system = Booter.newRepositorySystem(Booter.selectFactory(args))) {
-            SessionBuilder sessionBuilder = Booter.newRepositorySystemSession(system);
+            SessionBuilder sessionBuilder = Booter.newRepositorySystemSession(system, Booter.selectFs(args));
             sessionBuilder.setConfigProperty(ConflictResolver.CONFIG_PROP_VERBOSE, true);
             sessionBuilder.setConfigProperty(DependencyManagerUtils.CONFIG_PROP_VERBOSE, true);
             try (CloseableSession session = sessionBuilder
                     .setDependencyGraphTransformer(new ChainedDependencyGraphTransformer(
-                            new ConflictResolver(
+                            new ClassicConflictResolver(
                                     new ConfigurableVersionSelector(
                                             new ConfigurableVersionSelector.MajorVersionConvergence(
                                                     new ConfigurableVersionSelector.Nearest())),
@@ -98,12 +99,12 @@ public class GetDependencyHierarchyWithConflicts {
 
         // dependency divergence: multiple versions of same GA present in graph
         try (RepositorySystem system = Booter.newRepositorySystem(Booter.selectFactory(args))) {
-            SessionBuilder sessionBuilder = Booter.newRepositorySystemSession(system);
+            SessionBuilder sessionBuilder = Booter.newRepositorySystemSession(system, Booter.selectFs(args));
             sessionBuilder.setConfigProperty(ConflictResolver.CONFIG_PROP_VERBOSE, true);
             sessionBuilder.setConfigProperty(DependencyManagerUtils.CONFIG_PROP_VERBOSE, true);
             try (CloseableSession session = sessionBuilder
                     .setDependencyGraphTransformer(new ChainedDependencyGraphTransformer(
-                            new ConflictResolver(
+                            new ClassicConflictResolver(
                                     new ConfigurableVersionSelector(new ConfigurableVersionSelector.VersionConvergence(
                                             new ConfigurableVersionSelector.Nearest())),
                                     new JavaScopeSelector(),

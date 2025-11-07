@@ -30,11 +30,10 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.collection.CollectResult;
-import org.eclipse.aether.collection.DependencyGraphTransformer;
 import org.eclipse.aether.collection.DependencySelector;
-import org.eclipse.aether.graph.DependencyFilter;
 import org.eclipse.aether.impl.scope.BuildPath;
 import org.eclipse.aether.impl.scope.BuildScope;
 import org.eclipse.aether.impl.scope.BuildScopeQuery;
@@ -48,10 +47,6 @@ import org.eclipse.aether.scope.SystemDependencyScope;
 import org.eclipse.aether.util.filter.ScopeDependencyFilter;
 import org.eclipse.aether.util.graph.selector.AndDependencySelector;
 import org.eclipse.aether.util.graph.selector.ExclusionDependencySelector;
-import org.eclipse.aether.util.graph.transformer.ChainedDependencyGraphTransformer;
-import org.eclipse.aether.util.graph.transformer.ConfigurableVersionSelector;
-import org.eclipse.aether.util.graph.transformer.ConflictResolver;
-import org.eclipse.aether.util.graph.transformer.SimpleOptionalitySelector;
 import org.eclipse.aether.util.graph.visitor.CloningDependencyVisitor;
 import org.eclipse.aether.util.graph.visitor.FilteringDependencyVisitor;
 
@@ -64,7 +59,9 @@ public final class ScopeManagerImpl implements InternalScopeManager {
     private final BuildScopeSource buildScopeSource;
     private final AtomicReference<SystemDependencyScopeImpl> systemDependencyScope;
     private final Map<String, DependencyScopeImpl> dependencyScopes;
+    private final Collection<DependencyScope> dependencyScopesUniverse;
     private final Map<String, ResolutionScopeImpl> resolutionScopes;
+    private final Collection<ResolutionScope> resolutionScopesUniverse;
 
     public ScopeManagerImpl(ScopeManagerConfiguration configuration) {
         this.id = configuration.getId();
@@ -73,7 +70,9 @@ public final class ScopeManagerImpl implements InternalScopeManager {
         this.buildScopeSource = configuration.getBuildScopeSource();
         this.systemDependencyScope = new AtomicReference<>(null);
         this.dependencyScopes = Collections.unmodifiableMap(buildDependencyScopes(configuration));
+        this.dependencyScopesUniverse = Collections.unmodifiableCollection(new HashSet<>(dependencyScopes.values()));
         this.resolutionScopes = Collections.unmodifiableMap(buildResolutionScopes(configuration));
+        this.resolutionScopesUniverse = Collections.unmodifiableCollection(new HashSet<>(resolutionScopes.values()));
     }
 
     private Map<String, DependencyScopeImpl> buildDependencyScopes(ScopeManagerConfiguration configuration) {
@@ -111,7 +110,7 @@ public final class ScopeManagerImpl implements InternalScopeManager {
 
     @Override
     public Collection<DependencyScope> getDependencyScopeUniverse() {
-        return new HashSet<>(dependencyScopes.values());
+        return dependencyScopesUniverse;
     }
 
     @Override
@@ -125,7 +124,7 @@ public final class ScopeManagerImpl implements InternalScopeManager {
 
     @Override
     public Collection<ResolutionScope> getResolutionScopeUniverse() {
-        return new HashSet<>(resolutionScopes.values());
+        return resolutionScopesUniverse;
     }
 
     @Override
@@ -139,31 +138,33 @@ public final class ScopeManagerImpl implements InternalScopeManager {
     }
 
     @Override
-    public DependencySelector getDependencySelector(ResolutionScope resolutionScope) {
+    public DependencySelector getDependencySelector(RepositorySystemSession session, ResolutionScope resolutionScope) {
         ResolutionScopeImpl rs = translate(resolutionScope);
         Set<String> directlyExcludedLabels = getDirectlyExcludedLabels(rs);
         Set<String> transitivelyExcludedLabels = getTransitivelyExcludedLabels(rs);
-
-        return new AndDependencySelector(
-                rs.getMode() == Mode.ELIMINATE
-                        ? ScopeDependencySelector.fromTo(2, 2, null, directlyExcludedLabels)
-                        : ScopeDependencySelector.fromTo(1, 2, null, directlyExcludedLabels),
-                ScopeDependencySelector.from(2, null, transitivelyExcludedLabels),
-                OptionalDependencySelector.fromDirect(),
-                new ExclusionDependencySelector());
+        if (session.getDependencySelector() != null) {
+            return new AndDependencySelector(
+                    rs.getMode() == Mode.ELIMINATE
+                            ? ScopeDependencySelector.fromTo(2, 2, null, directlyExcludedLabels)
+                            : ScopeDependencySelector.fromTo(1, 2, null, directlyExcludedLabels),
+                    ScopeDependencySelector.from(2, null, transitivelyExcludedLabels),
+                    OptionalDependencySelector.fromDirect(),
+                    new ExclusionDependencySelector(),
+                    session.getDependencySelector());
+        } else {
+            return new AndDependencySelector(
+                    rs.getMode() == Mode.ELIMINATE
+                            ? ScopeDependencySelector.fromTo(2, 2, null, directlyExcludedLabels)
+                            : ScopeDependencySelector.fromTo(1, 2, null, directlyExcludedLabels),
+                    ScopeDependencySelector.from(2, null, transitivelyExcludedLabels),
+                    OptionalDependencySelector.fromDirect(),
+                    new ExclusionDependencySelector());
+        }
     }
 
     @Override
-    public DependencyGraphTransformer getDependencyGraphTransformer(ResolutionScope resolutionScope) {
-        return new ChainedDependencyGraphTransformer(
-                new ConflictResolver(
-                        new ConfigurableVersionSelector(), new ManagedScopeSelector(this),
-                        new SimpleOptionalitySelector(), new ManagedScopeDeriver(this)),
-                new ManagedDependencyContextRefiner(this));
-    }
-
-    @Override
-    public CollectResult postProcess(ResolutionScope resolutionScope, CollectResult collectResult) {
+    public CollectResult postProcess(
+            RepositorySystemSession session, ResolutionScope resolutionScope, CollectResult collectResult) {
         ResolutionScopeImpl rs = translate(resolutionScope);
         if (rs.getMode() == Mode.ELIMINATE) {
             CloningDependencyVisitor cloning = new CloningDependencyVisitor();
@@ -173,11 +174,6 @@ public final class ScopeManagerImpl implements InternalScopeManager {
             collectResult.setRoot(cloning.getRootNode());
         }
         return collectResult;
-    }
-
-    @Override
-    public DependencyFilter getDependencyFilter(ResolutionScope resolutionScope) {
-        return new ScopeDependencyFilter(null, getDirectlyExcludedLabels(translate(resolutionScope)));
     }
 
     @Override
@@ -408,7 +404,6 @@ public final class ScopeManagerImpl implements InternalScopeManager {
     }
 
     private class ResolutionScopeImpl implements ResolutionScope {
-
         private final String id;
         private final Mode mode;
         private final Set<BuildScopeQuery> wantedPresence;

@@ -51,7 +51,7 @@ public final class DefaultArtifactPredicateFactory implements ArtifactPredicateF
     public static final String CONFIG_PROP_OMIT_CHECKSUMS_FOR_EXTENSIONS =
             CONFIG_PROPS_PREFIX + "omitChecksumsForExtensions";
 
-    public static final String DEFAULT_OMIT_CHECKSUMS_FOR_EXTENSIONS = ".asc,.sigstore";
+    public static final String DEFAULT_OMIT_CHECKSUMS_FOR_EXTENSIONS = ".asc,.sigstore,.sigstore.json";
 
     private final ChecksumAlgorithmFactorySelector checksumAlgorithmFactorySelector;
 
@@ -68,7 +68,7 @@ public final class DefaultArtifactPredicateFactory implements ArtifactPredicateF
                                 DEFAULT_OMIT_CHECKSUMS_FOR_EXTENSIONS,
                                 CONFIG_PROP_OMIT_CHECKSUMS_FOR_EXTENSIONS)
                         .split(","))
-                .filter(s -> s != null && !s.trim().isEmpty())
+                .filter(s -> !s.trim().isEmpty())
                 .collect(Collectors.toSet());
 
         // validation: enforce that all strings in this set are having leading dot

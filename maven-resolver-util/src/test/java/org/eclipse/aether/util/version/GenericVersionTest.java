@@ -231,6 +231,7 @@ public class GenericVersionTest extends AbstractVersionTest {
 
     @Test
     void testTrailingZerosBeforeQualifierAreSemanticallyIrrelevant() {
+        assertOrder(X_EQ_Y, "1.0_ga", "1.0.0_ga");
         assertOrder(X_EQ_Y, "1.0-ga", "1.0.0-ga");
         assertOrder(X_EQ_Y, "1.0.ga", "1.0.0.ga");
         assertOrder(X_EQ_Y, "1.0ga", "1.0.0ga");
@@ -253,6 +254,7 @@ public class GenericVersionTest extends AbstractVersionTest {
         assertOrder(X_EQ_Y, "1", "1-------------");
         assertOrder(X_EQ_Y, "1.0", "1.............");
         assertOrder(X_EQ_Y, "1.0", "1-------------");
+        assertOrder(X_EQ_Y, "1.0", "1_______");
     }
 
     @Test
@@ -261,6 +263,7 @@ public class GenericVersionTest extends AbstractVersionTest {
         assertOrder(X_EQ_Y, "0.0.1", "..1");
         assertOrder(X_EQ_Y, "0.1", "-1");
         assertOrder(X_EQ_Y, "0.0.1", "--1");
+        assertOrder(X_EQ_Y, "0.1", "_1");
     }
 
     @Test
@@ -282,7 +285,7 @@ public class GenericVersionTest extends AbstractVersionTest {
     }
 
     @Test
-    void testTransitionFromDigitToLetterAndViceVersaIsEqualivantToDelimiter() {
+    void testTransitionFromDigitToLetterAndViceVersaIsEquivalentToDelimiter() {
         assertOrder(X_EQ_Y, "1alpha10", "1.alpha.10");
         assertOrder(X_EQ_Y, "1alpha10", "1-alpha-10");
 
@@ -400,6 +403,13 @@ public class GenericVersionTest extends AbstractVersionTest {
     }
 
     @Test
+    void testHypenBeforeUnderscoreDotOrder() {
+        assertOrder(X_EQ_Y, "1.0.0-1", "1.0.0_1");
+        assertOrder(X_EQ_Y, "1.0.0-1", "1.0.0.1");
+        assertOrder(X_EQ_Y, "1.0.0_1", "1.0.0.1");
+    }
+
+    @Test
     void testCaseInsensitiveOrderingOfQualifiersIsLocaleIndependent() {
         Locale orig = Locale.getDefault();
         try {
@@ -495,8 +505,32 @@ public class GenericVersionTest extends AbstractVersionTest {
         assertOrder(X_LT_Y, "1.max", "2.min");
     }
 
+    @Test
+    void testCompareLettersToNumbers() {
+        assertOrder(X_GT_Y, "1.7", "J");
+    }
+
+    @Test
+    void testCompareDigitToLetter() {
+        assertOrder(X_GT_Y, "7", "J");
+        assertOrder(X_GT_Y, "7", "c");
+    }
+
+    @Test
+    void testNonAsciiDigits() { // These should not be treated as digits.
+        String arabicEight = "\u0668";
+        assertOrder(X_GT_Y, "1", arabicEight);
+        assertOrder(X_GT_Y, "9", arabicEight);
+    }
+
+    @Test
+    void testLexicographicOrder() {
+        assertOrder(X_GT_Y, "zebra", "aardvark");
+        assertOrder(X_GT_Y, "ζέβρα", "zebra");
+    }
+
     /**
-     * UT for <a href="https://issues.apache.org/jira/browse/MRESOLVER-314">MRESOLVER-314</a>.
+     * Test for <a href="https://issues.apache.org/jira/browse/MRESOLVER-314">MRESOLVER-314</a>.
      *
      * Generates random UUID string based versions and tries to sort them. While this test is not as reliable
      * as {@link #testCompareUuidVersionStringStream()}, it covers broader range and in case it fails it records

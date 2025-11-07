@@ -23,17 +23,26 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collection;
 import java.util.Collections;
 
 import org.eclipse.aether.DefaultRepositorySystemSession;
+import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.Artifact;
+import org.eclipse.aether.impl.MetadataResolver;
+import org.eclipse.aether.impl.RemoteRepositoryManager;
 import org.eclipse.aether.internal.impl.DefaultArtifactPredicateFactory;
 import org.eclipse.aether.internal.impl.DefaultRepositoryLayoutProvider;
 import org.eclipse.aether.internal.impl.Maven2RepositoryLayoutFactory;
 import org.eclipse.aether.repository.RemoteRepository;
+import org.eclipse.aether.resolution.MetadataRequest;
+import org.eclipse.aether.resolution.MetadataResult;
 import org.eclipse.aether.spi.connector.filter.RemoteRepositoryFilterSource;
 
 import static org.eclipse.aether.internal.impl.checksum.Checksums.checksumsSelector;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * UT for {@link PrefixesRemoteRepositoryFilterSource}.
@@ -42,17 +51,25 @@ public class PrefixesRemoteRepositoryFilterSourceTest extends RemoteRepositoryFi
     @Override
     protected RemoteRepositoryFilterSource getRemoteRepositoryFilterSource(
             DefaultRepositorySystemSession session, RemoteRepository remoteRepository) {
+        // in test we do not resolve; just reply failed resolution
+        MetadataResult failed = new MetadataResult(new MetadataRequest());
+        MetadataResolver metadataResolver = mock(MetadataResolver.class);
+        RemoteRepositoryManager remoteRepositoryManager = mock(RemoteRepositoryManager.class);
+        when(metadataResolver.resolveMetadata(any(RepositorySystemSession.class), any(Collection.class)))
+                .thenReturn(Collections.singletonList(failed));
         DefaultRepositoryLayoutProvider layoutProvider = new DefaultRepositoryLayoutProvider(Collections.singletonMap(
                 Maven2RepositoryLayoutFactory.NAME,
                 new Maven2RepositoryLayoutFactory(
                         checksumsSelector(), new DefaultArtifactPredicateFactory(checksumsSelector()))));
-        return new PrefixesRemoteRepositoryFilterSource(layoutProvider);
+        return new PrefixesRemoteRepositoryFilterSource(
+                () -> metadataResolver, () -> remoteRepositoryManager, layoutProvider);
     }
 
     @Override
-    protected void enableSource(DefaultRepositorySystemSession session) {
+    protected void enableSource(DefaultRepositorySystemSession session, boolean enabled) {
         session.setConfigProperty(
-                "aether.remoteRepositoryFilter." + PrefixesRemoteRepositoryFilterSource.NAME, Boolean.TRUE.toString());
+                "aether.remoteRepositoryFilter." + PrefixesRemoteRepositoryFilterSource.NAME,
+                Boolean.valueOf(enabled).toString());
     }
 
     @Override
@@ -60,14 +77,16 @@ public class PrefixesRemoteRepositoryFilterSourceTest extends RemoteRepositoryFi
             DefaultRepositorySystemSession session, RemoteRepository remoteRepository, Artifact artifact) {
         try {
             Path baseDir = session.getLocalRepository()
-                    .getBasedir()
-                    .toPath()
+                    .getBasePath()
                     .resolve(PrefixesRemoteRepositoryFilterSource.LOCAL_REPO_PREFIX_DIR);
-            Path groupId = baseDir.resolve(PrefixesRemoteRepositoryFilterSource.PREFIXES_FILE_PREFIX
+            Path prefixes = baseDir.resolve(PrefixesRemoteRepositoryFilterSource.PREFIXES_FILE_PREFIX
                     + remoteRepository.getId()
                     + PrefixesRemoteRepositoryFilterSource.PREFIXES_FILE_SUFFIX);
-            Files.createDirectories(groupId.getParent());
-            Files.write(groupId, artifact.getGroupId().replaceAll("\\.", "/").getBytes(StandardCharsets.UTF_8));
+            Files.createDirectories(prefixes.getParent());
+            Files.write(
+                    prefixes,
+                    ("## repository-prefixes/2.0\n" + artifact.getGroupId().replaceAll("\\.", "/"))
+                            .getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
