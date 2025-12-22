@@ -112,7 +112,7 @@
     <!-- Used by Jetty Transport (client) and Test HTTP (server) -->
     <jettyVersion>10.0.26</jettyVersion>
     <!-- used by supplier and demo only -->
-    <maven3Version>3.9.11</maven3Version>
+    <maven3Version>3.9.12</maven3Version>
     <maven4Version>4.0.0-rc-4</maven4Version>
     <minimalMavenBuildVersion>[3.8.8,)</minimalMavenBuildVersion>
     <!-- MRESOLVER-422: keep this in sync with Javadoc plugin configuration (but cannot directly, as this below is range) -->
@@ -338,7 +338,7 @@
         <plugin>
           <groupId>com.github.siom79.japicmp</groupId>
           <artifactId>japicmp-maven-plugin</artifactId>
-          <version>0.25.0</version>
+          <version>0.25.1</version>
           <configuration>
             <oldVersion>
               <!-- We compare same module against 1.8.0 set as "baseline" -->

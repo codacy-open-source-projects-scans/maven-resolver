@@ -132,7 +132,7 @@
     <dependency>
       <groupId>org.ow2.asm</groupId>
       <artifactId>asm</artifactId>
-      <version>9.9</version>
+      <version>9.9.1</version>
     </dependency>
     <dependency>
       <groupId>org.apache.velocity</groupId>
@@ -172,7 +172,7 @@
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
-        <version>3.6.2</version>
+        <version>3.6.3</version>
         <executions>
           <execution>
             <id>render-configuration-page</id>
