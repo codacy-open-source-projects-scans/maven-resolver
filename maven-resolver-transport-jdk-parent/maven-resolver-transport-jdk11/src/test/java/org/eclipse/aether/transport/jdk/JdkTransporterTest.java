@@ -30,7 +30,6 @@ import org.eclipse.aether.spi.connector.transport.PeekTask;
 import org.eclipse.aether.spi.connector.transport.Transporter;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.DisabledOnJre;
 import org.junit.jupiter.api.condition.JRE;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,9 +42,20 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class JdkTransporterTest extends HttpTransporterTest {
 
+    private boolean isBetweenJava17and21() {
+        JRE currentJre = JRE.currentJre();
+        return currentJre.compareTo(JRE.JAVA_17) >= 0 && currentJre.compareTo(JRE.JAVA_21) <= 0;
+    }
+
+    @Override
+    protected boolean supportsPreemptiveAuth() {
+        // due to JDK-8326949 (https://bugs.openjdk.org/browse/JDK-8326949)
+        return !isBetweenJava17and21();
+    }
+
     @Override
     protected Stream<String> supportedCompressionAlgorithms() {
-        return Stream.of("gzip", "deflate", "br");
+        return Stream.of("gzip", "deflate");
     }
 
     @Override
@@ -59,36 +69,9 @@ class JdkTransporterTest extends HttpTransporterTest {
     protected void testPut_ProxyUnauthenticated() {}
 
     @Override
-    @DisabledOnJre(
-            value = {JRE.JAVA_17, JRE.JAVA_21},
-            disabledReason = "JDK-8326949")
-    @Test
-    protected void testAuthSchemePreemptive() throws Exception {
-        super.testAuthSchemePreemptive();
-    }
-
-    @Override
-    @DisabledOnJre(
-            value = {JRE.JAVA_17, JRE.JAVA_21},
-            disabledReason = "JDK-8326949")
-    @Test
-    protected void testPut_AuthCache_Preemptive() throws Exception {
-        super.testPut_AuthCache_Preemptive();
-    }
-
-    @Override
     @Disabled
     @Test
     protected void testPut_Unauthenticated() {}
-
-    @Override
-    @DisabledOnJre(
-            value = {JRE.JAVA_17, JRE.JAVA_21},
-            disabledReason = "JDK-8326949")
-    @Test
-    protected void testPut_PreemptiveIsDefault() throws Exception {
-        super.testPut_PreemptiveIsDefault();
-    }
 
     @Override
     @Disabled
