@@ -29,6 +29,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -99,69 +102,142 @@ public class FileLockNamedLockFactory extends NamedLockFactorySupport {
 
     private static final long SLEEP_MILLIS = Long.parseLong(System.getProperty(SYSTEM_PROP_SLEEP_MILLIS, "50"));
 
+    /**
+     * Maximum number of idle (not currently locked) FileChannels to keep open for reuse. Keeping channels open
+     * avoids repeated {@code open}/{@code creat} syscalls, but each open channel consumes a file descriptor.
+     * On systems with low FD limits (e.g., macOS defaults to 256), large reactor builds with thousands of
+     * unique artifacts can exhaust the limit. This cap bounds idle channel retention; channels for actively
+     * held locks are never evicted.
+     *
+     * @configurationSource {@link System#getProperty(String, String)}
+     * @configurationType {@link java.lang.Integer}
+     * @configurationDefaultValue 200
+     */
+    public static final String SYSTEM_PROP_MAX_CACHED_CHANNELS = "aether.named.file-lock.maxCachedChannels";
+
+    private static final int MAX_CACHED_CHANNELS =
+            Integer.parseInt(System.getProperty(SYSTEM_PROP_MAX_CACHED_CHANNELS, "200"));
+
     private final ConcurrentMap<NamedLockKey, FileChannel> fileChannels;
+
+    /**
+     * LRU pool of idle (unlocked) channels available for reuse. Access-ordered: the least recently used
+     * entry is evicted first when the pool exceeds {@link #MAX_CACHED_CHANNELS}. Guarded by its own
+     * monitor; never held while performing I/O.
+     */
+    private final LinkedHashMap<NamedLockKey, FileChannel> idleChannels;
 
     public FileLockNamedLockFactory() {
         this.fileChannels = new ConcurrentHashMap<>();
+        this.idleChannels = new LinkedHashMap<>(64, 0.75f, true); // access-order
     }
 
     @Override
     protected NamedLockSupport createLock(final NamedLockKey key) {
         Path path = Paths.get(URI.create(key.name()));
-        FileChannel fileChannel = fileChannels.computeIfAbsent(key, k -> {
-            try {
-                Files.createDirectories(path.getParent());
-                FileChannel channel = retry(
-                        ATTEMPTS,
-                        SLEEP_MILLIS,
-                        () -> {
-                            if (DELETE_LOCK_FILES) {
-                                return FileChannel.open(
-                                        path,
-                                        StandardOpenOption.READ,
-                                        StandardOpenOption.WRITE,
-                                        StandardOpenOption.CREATE,
-                                        StandardOpenOption.DELETE_ON_CLOSE);
-                            } else {
-                                return FileChannel.open(
-                                        path,
-                                        StandardOpenOption.READ,
-                                        StandardOpenOption.WRITE,
-                                        StandardOpenOption.CREATE);
-                            }
-                        },
-                        null,
-                        null);
-
-                if (channel == null) {
-                    throw new IllegalStateException(
-                            "Could not open file channel for '" + key + "' after " + ATTEMPTS + " attempts; giving up");
-                }
-                return channel;
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Interrupted while opening file channel for '" + key + "'", e);
-            } catch (IOException e) {
-                throw new UncheckedIOException("Failed to open file channel for '" + key + "'", e);
+        // Try to reclaim an idle channel first (avoids open syscall)
+        FileChannel fileChannel;
+        synchronized (idleChannels) {
+            fileChannel = idleChannels.remove(key);
+        }
+        if (fileChannel != null && fileChannel.isOpen()) {
+            fileChannels.put(key, fileChannel);
+        } else {
+            fileChannel = fileChannels.computeIfAbsent(key, k -> openFileChannel(key, path));
+            if (!fileChannel.isOpen()) {
+                // Channel was closed externally (I/O error, NFS hiccup, etc.). Evict the stale entry
+                // and open a fresh one. remove(key, fileChannel) is atomic: it only removes if the
+                // value is still this exact (stale) instance, avoiding races with other threads that
+                // may have already replaced it.
+                fileChannels.remove(key, fileChannel);
+                fileChannel = fileChannels.computeIfAbsent(key, k -> openFileChannel(key, path));
             }
-        });
+        }
         return new FileLockNamedLock(key, fileChannel, this);
+    }
+
+    private FileChannel openFileChannel(NamedLockKey key, Path path) {
+        try {
+            Files.createDirectories(path.getParent());
+            FileChannel channel = retry(
+                    ATTEMPTS,
+                    SLEEP_MILLIS,
+                    () -> {
+                        if (DELETE_LOCK_FILES) {
+                            return FileChannel.open(
+                                    path,
+                                    StandardOpenOption.READ,
+                                    StandardOpenOption.WRITE,
+                                    StandardOpenOption.CREATE,
+                                    StandardOpenOption.DELETE_ON_CLOSE);
+                        } else {
+                            return FileChannel.open(
+                                    path, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
+                        }
+                    },
+                    null,
+                    null);
+
+            if (channel == null) {
+                throw new IllegalStateException(
+                        "Could not open file channel for '" + key + "' after " + ATTEMPTS + " attempts; giving up");
+            }
+            return channel;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while opening file channel for '" + key + "'", e);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to open file channel for '" + key + "'", e);
+        }
     }
 
     @Override
     protected void destroyLock(final NamedLock namedLock) {
-        if (namedLock instanceof FileLockNamedLock) {
-            final NamedLockKey key = namedLock.key();
-            FileChannel fileChannel = fileChannels.remove(key);
-            if (fileChannel == null) {
-                throw new IllegalStateException("File channel expected, but does not exist: " + key);
+        NamedLockKey key = namedLock.key();
+        FileChannel channel = fileChannels.remove(key);
+        if (channel == null) {
+            return;
+        }
+        // Move the channel to the idle pool for reuse by future createLock() calls.
+        // Evict the least recently used idle channel if the pool is full.
+        FileChannel evicted = null;
+        synchronized (idleChannels) {
+            idleChannels.put(key, channel);
+            if (idleChannels.size() > MAX_CACHED_CHANNELS) {
+                Iterator<Map.Entry<NamedLockKey, FileChannel>> it =
+                        idleChannels.entrySet().iterator();
+                evicted = it.next().getValue();
+                it.remove();
             }
-
+        }
+        if (evicted != null) {
             try {
-                fileChannel.close();
+                evicted.close();
             } catch (IOException e) {
-                throw new UncheckedIOException("Failed to close file channel for '" + key + "'", e);
+                logger.warn("Failed to close evicted file channel", e);
             }
+        }
+    }
+
+    @Override
+    protected void doShutdown() {
+        for (FileChannel channel : fileChannels.values()) {
+            try {
+                channel.close();
+            } catch (IOException e) {
+                logger.warn("Failed to close file channel", e);
+            }
+        }
+        fileChannels.clear();
+        synchronized (idleChannels) {
+            for (FileChannel channel : idleChannels.values()) {
+                try {
+                    channel.close();
+                } catch (IOException e) {
+                    logger.warn("Failed to close idle file channel", e);
+                }
+            }
+            idleChannels.clear();
         }
     }
 }

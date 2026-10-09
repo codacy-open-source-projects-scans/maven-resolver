@@ -106,6 +106,43 @@ import static java.util.stream.Collectors.toList;
 @Singleton
 @Named
 public class DefaultRepositorySystem implements RepositorySystem {
+    /**
+     * Sentinel object placed into the {@link RequestTrace} chain by each public method
+     * to detect re-entrant calls into this {@code RepositorySystem}.
+     * <p>
+     * The resolver's architecture assumes that internal components ({@code ArtifactResolver},
+     * {@code DependencyCollector}, {@code ArtifactDescriptorReader}, etc.) call each other
+     * directly via the internal API in {@code org.eclipse.aether.impl}, never going through
+     * the public {@code RepositorySystem} facade. This means session validation, request
+     * validation, and artifact decoration only need to run once — on the outermost call.
+     * <p>
+     * However, some {@code RepositorySystem} consumers (notably Maven 4's
+     * {@code ArtifactDescriptorReader} → {@code ModelBuilder} → {@code ModelResolver} chain)
+     * re-enter {@code RepositorySystem} during an ongoing operation. Without this guard,
+     * every re-entrant call redundantly validates the session, validates the request (which
+     * may reject intermediate state like uninterpolated expressions from transitive POMs),
+     * and applies artifact decorators. This causes both correctness issues (false validation
+     * failures) and unnecessary performance overhead.
+     * <p>
+     * Re-entrancy can happen on the <em>same</em> thread (e.g. {@code collectDependencies}
+     * → {@code readArtifactDescriptor} → model builder → model resolver → {@code resolveVersionRange})
+     * or on a <em>different</em> thread when the resolver uses internal parallelism (e.g.
+     * {@code BfDependencyCollector}'s {@code SmartExecutor} dispatches descriptor resolution
+     * to pool threads, which then re-enter {@code RepositorySystem} via the model resolver).
+     * <p>
+     * To handle both cases, we leverage the {@link RequestTrace} chain that is already
+     * propagated across threads by the caller (e.g. Maven's model builder explicitly copies
+     * traces to pool threads). On the outermost call, we stamp this marker into the request's
+     * trace. On re-entry — whether on the same thread or a pool thread — the marker is found
+     * in the trace ancestry, so validation and decoration are skipped.
+     */
+    private static final Object REPOSITORY_SYSTEM_CALL = new Object() {
+        @Override
+        public String toString() {
+            return "RepositorySystem";
+        }
+    };
+
     private final AtomicBoolean shutdown;
 
     private final AtomicInteger sessionIdCounter;
@@ -182,136 +219,244 @@ public class DefaultRepositorySystem implements RepositorySystem {
     @Override
     public VersionResult resolveVersion(RepositorySystemSession session, VersionRequest request)
             throws VersionResolutionException {
-        validateSession(session);
         requireNonNull(request, "request cannot be null");
-        repositorySystemValidator.validateVersionRequest(session, request);
-        return versionResolver.resolveVersion(session, request);
+        Runnable exitGuard = null;
+        if (!isReentrant(request.getTrace(), session)) {
+            validateSession(session);
+            repositorySystemValidator.validateVersionRequest(session, request);
+            request.setTrace(stampReentrancyMarker(request.getTrace()));
+            exitGuard = enterSessionScope(session);
+        }
+        try {
+            return versionResolver.resolveVersion(session, request);
+        } finally {
+            if (exitGuard != null) {
+                exitGuard.run();
+            }
+        }
     }
 
     @Override
     public VersionRangeResult resolveVersionRange(RepositorySystemSession session, VersionRangeRequest request)
             throws VersionRangeResolutionException {
-        validateSession(session);
         requireNonNull(request, "request cannot be null");
-        repositorySystemValidator.validateVersionRangeRequest(session, request);
-        return versionRangeResolver.resolveVersionRange(session, request);
+        Runnable exitGuard = null;
+        if (!isReentrant(request.getTrace(), session)) {
+            validateSession(session);
+            repositorySystemValidator.validateVersionRangeRequest(session, request);
+            request.setTrace(stampReentrancyMarker(request.getTrace()));
+            exitGuard = enterSessionScope(session);
+        }
+        try {
+            return versionRangeResolver.resolveVersionRange(session, request);
+        } finally {
+            if (exitGuard != null) {
+                exitGuard.run();
+            }
+        }
     }
 
     @Override
     public ArtifactDescriptorResult readArtifactDescriptor(
             RepositorySystemSession session, ArtifactDescriptorRequest request) throws ArtifactDescriptorException {
-        validateSession(session);
         requireNonNull(request, "request cannot be null");
-        repositorySystemValidator.validateArtifactDescriptorRequest(session, request);
-        ArtifactDescriptorResult descriptorResult = artifactDescriptorReader.readArtifactDescriptor(session, request);
-        for (ArtifactDecorator decorator : Utils.getArtifactDecorators(session, artifactDecoratorFactories)) {
-            descriptorResult.setArtifact(decorator.decorateArtifact(descriptorResult));
+        boolean outermost = !isReentrant(request.getTrace(), session);
+        Runnable exitGuard = null;
+        if (outermost) {
+            validateSession(session);
+            repositorySystemValidator.validateArtifactDescriptorRequest(session, request);
+            request.setTrace(stampReentrancyMarker(request.getTrace()));
+            exitGuard = enterSessionScope(session);
         }
-        return descriptorResult;
+        try {
+            ArtifactDescriptorResult descriptorResult =
+                    artifactDescriptorReader.readArtifactDescriptor(session, request);
+            if (outermost) {
+                for (ArtifactDecorator decorator : Utils.getArtifactDecorators(session, artifactDecoratorFactories)) {
+                    descriptorResult.setArtifact(decorator.decorateArtifact(descriptorResult));
+                }
+            }
+            return descriptorResult;
+        } finally {
+            if (exitGuard != null) {
+                exitGuard.run();
+            }
+        }
     }
 
     @Override
     public ArtifactResult resolveArtifact(RepositorySystemSession session, ArtifactRequest request)
             throws ArtifactResolutionException {
-        validateSession(session);
         requireNonNull(request, "request cannot be null");
-        repositorySystemValidator.validateArtifactRequests(session, Collections.singleton(request));
-        return artifactResolver.resolveArtifact(session, request);
+        Runnable exitGuard = null;
+        if (!isReentrant(request.getTrace(), session)) {
+            validateSession(session);
+            repositorySystemValidator.validateArtifactRequests(session, Collections.singleton(request));
+            request.setTrace(stampReentrancyMarker(request.getTrace()));
+            exitGuard = enterSessionScope(session);
+        }
+        try {
+            return artifactResolver.resolveArtifact(session, request);
+        } finally {
+            if (exitGuard != null) {
+                exitGuard.run();
+            }
+        }
     }
 
     @Override
     public List<ArtifactResult> resolveArtifacts(
             RepositorySystemSession session, Collection<? extends ArtifactRequest> requests)
             throws ArtifactResolutionException {
-        validateSession(session);
         requireNonNull(requests, "requests cannot be null");
-        repositorySystemValidator.validateArtifactRequests(session, requests);
-        return artifactResolver.resolveArtifacts(session, requests);
+        // All requests in a batch share the same trace context, so checking any one is sufficient.
+        RequestTrace firstTrace = requests.stream()
+                .map(ArtifactRequest::getTrace)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(null);
+        Runnable exitGuard = null;
+        if (!isReentrant(firstTrace, session)) {
+            validateSession(session);
+            repositorySystemValidator.validateArtifactRequests(session, requests);
+            for (ArtifactRequest request : requests) {
+                request.setTrace(stampReentrancyMarker(request.getTrace()));
+            }
+            exitGuard = enterSessionScope(session);
+        }
+        try {
+            return artifactResolver.resolveArtifacts(session, requests);
+        } finally {
+            if (exitGuard != null) {
+                exitGuard.run();
+            }
+        }
     }
 
     @Override
     public List<MetadataResult> resolveMetadata(
             RepositorySystemSession session, Collection<? extends MetadataRequest> requests) {
-        validateSession(session);
         requireNonNull(requests, "requests cannot be null");
-        repositorySystemValidator.validateMetadataRequests(session, requests);
-        return metadataResolver.resolveMetadata(session, requests);
+        // All requests in a batch share the same trace context, so checking any one is sufficient.
+        RequestTrace firstTrace = requests.stream()
+                .map(MetadataRequest::getTrace)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(null);
+        Runnable exitGuard = null;
+        if (!isReentrant(firstTrace, session)) {
+            validateSession(session);
+            repositorySystemValidator.validateMetadataRequests(session, requests);
+            for (MetadataRequest request : requests) {
+                request.setTrace(stampReentrancyMarker(request.getTrace()));
+            }
+            exitGuard = enterSessionScope(session);
+        }
+        try {
+            return metadataResolver.resolveMetadata(session, requests);
+        } finally {
+            if (exitGuard != null) {
+                exitGuard.run();
+            }
+        }
     }
 
     @Override
     public CollectResult collectDependencies(RepositorySystemSession session, CollectRequest request)
             throws DependencyCollectionException {
-        validateSession(session);
         requireNonNull(request, "request cannot be null");
-        repositorySystemValidator.validateCollectRequest(session, request);
-        return dependencyCollector.collectDependencies(session, request);
+        Runnable exitGuard = null;
+        if (!isReentrant(request.getTrace(), session)) {
+            validateSession(session);
+            repositorySystemValidator.validateCollectRequest(session, request);
+            request.setTrace(stampReentrancyMarker(request.getTrace()));
+            exitGuard = enterSessionScope(session);
+        }
+        try {
+            return dependencyCollector.collectDependencies(session, request);
+        } finally {
+            if (exitGuard != null) {
+                exitGuard.run();
+            }
+        }
     }
 
     @Override
     public DependencyResult resolveDependencies(RepositorySystemSession session, DependencyRequest request)
             throws DependencyResolutionException {
-        validateSession(session);
         requireNonNull(request, "request cannot be null");
-        repositorySystemValidator.validateDependencyRequest(session, request);
-        RequestTrace trace = RequestTrace.newChild(request.getTrace(), request);
-
-        DependencyResult result = new DependencyResult(request);
-
-        DependencyCollectionException dce = null;
-        ArtifactResolutionException are = null;
-
-        if (request.getRoot() != null) {
-            result.setRoot(request.getRoot());
-        } else if (request.getCollectRequest() != null) {
-            CollectResult collectResult;
-            try {
-                request.getCollectRequest().setTrace(trace);
-                collectResult = dependencyCollector.collectDependencies(session, request.getCollectRequest());
-            } catch (DependencyCollectionException e) {
-                dce = e;
-                collectResult = e.getResult();
-            }
-            result.setRoot(collectResult.getRoot());
-            result.setCycles(collectResult.getCycles());
-            result.setCollectExceptions(collectResult.getExceptions());
-        } else {
-            throw new NullPointerException("dependency node and collect request cannot be null");
+        Runnable exitGuard = null;
+        if (!isReentrant(request.getTrace(), session)) {
+            validateSession(session);
+            repositorySystemValidator.validateDependencyRequest(session, request);
+            request.setTrace(stampReentrancyMarker(request.getTrace()));
+            exitGuard = enterSessionScope(session);
         }
-
-        final List<DependencyNode> dependencyNodes =
-                doFlattenDependencyNodes(session, result.getRoot(), request.getFilter());
-
-        final List<ArtifactRequest> requests = dependencyNodes.stream()
-                .map(n -> {
-                    if (n.getDependency() != null) {
-                        ArtifactRequest artifactRequest = new ArtifactRequest(n);
-                        artifactRequest.setTrace(trace);
-                        return artifactRequest;
-                    } else {
-                        return null;
-                    }
-                })
-                .filter(Objects::nonNull)
-                .collect(Collectors.toList());
-        List<ArtifactResult> results;
         try {
-            results = artifactResolver.resolveArtifacts(session, requests);
-        } catch (ArtifactResolutionException e) {
-            are = e;
-            results = e.getResults();
+            RequestTrace trace = RequestTrace.newChild(request.getTrace(), request);
+
+            DependencyResult result = new DependencyResult(request);
+
+            DependencyCollectionException dce = null;
+            ArtifactResolutionException are = null;
+
+            if (request.getRoot() != null) {
+                result.setRoot(request.getRoot());
+            } else if (request.getCollectRequest() != null) {
+                CollectResult collectResult;
+                try {
+                    request.getCollectRequest().setTrace(trace);
+                    collectResult = dependencyCollector.collectDependencies(session, request.getCollectRequest());
+                } catch (DependencyCollectionException e) {
+                    dce = e;
+                    collectResult = e.getResult();
+                }
+                result.setRoot(collectResult.getRoot());
+                result.setCycles(collectResult.getCycles());
+                result.setCollectExceptions(collectResult.getExceptions());
+            } else {
+                throw new NullPointerException("dependency node and collect request cannot be null");
+            }
+
+            final List<DependencyNode> dependencyNodes =
+                    doFlattenDependencyNodes(session, result.getRoot(), request.getFilter());
+
+            final List<ArtifactRequest> requests = dependencyNodes.stream()
+                    .map(n -> {
+                        if (n.getDependency() != null) {
+                            ArtifactRequest artifactRequest = new ArtifactRequest(n);
+                            artifactRequest.setTrace(trace);
+                            return artifactRequest;
+                        } else {
+                            return null;
+                        }
+                    })
+                    .filter(Objects::nonNull)
+                    .collect(Collectors.toList());
+            List<ArtifactResult> results;
+            try {
+                results = artifactResolver.resolveArtifacts(session, requests);
+            } catch (ArtifactResolutionException e) {
+                are = e;
+                results = e.getResults();
+            }
+            result.setDependencyNodeResults(dependencyNodes);
+            result.setArtifactResults(results);
+
+            updateNodesWithResolvedArtifacts(results);
+
+            if (dce != null) {
+                throw new DependencyResolutionException(result, dce);
+            } else if (are != null) {
+                throw new DependencyResolutionException(result, are);
+            }
+
+            return result;
+        } finally {
+            if (exitGuard != null) {
+                exitGuard.run();
+            }
         }
-        result.setDependencyNodeResults(dependencyNodes);
-        result.setArtifactResults(results);
-
-        updateNodesWithResolvedArtifacts(results);
-
-        if (dce != null) {
-            throw new DependencyResolutionException(result, dce);
-        } else if (are != null) {
-            throw new DependencyResolutionException(result, are);
-        }
-
-        return result;
     }
 
     @Override
@@ -319,7 +464,6 @@ public class DefaultRepositorySystem implements RepositorySystem {
             RepositorySystemSession session, DependencyNode root, DependencyFilter dependencyFilter) {
         validateSession(session);
         requireNonNull(root, "root cannot be null");
-
         return doFlattenDependencyNodes(session, root, dependencyFilter);
     }
 
@@ -441,7 +585,6 @@ public class DefaultRepositorySystem implements RepositorySystem {
         validateSession(session);
         validateRepositories(repositories);
         repositorySystemValidator.validateRemoteRepositories(session, repositories);
-
         return remoteRepositoryManager.aggregateRepositories(session, new ArrayList<>(), repositories, true);
     }
 
@@ -450,7 +593,6 @@ public class DefaultRepositorySystem implements RepositorySystem {
         validateSession(session);
         requireNonNull(repository, "repository cannot be null");
         repositorySystemValidator.validateRemoteRepositories(session, Collections.singletonList(repository));
-
         Authentication auth = session.getAuthenticationSelector().getAuthentication(repository);
         Proxy proxy = session.getProxySelector().getProxy(repository);
         return new RemoteRepository.Builder(repository)
@@ -478,6 +620,80 @@ public class DefaultRepositorySystem implements RepositorySystem {
         if (shutdown.compareAndSet(false, true)) {
             repositorySystemLifecycle.systemEnded();
         }
+    }
+
+    /**
+     * Thread-scoped re-entrancy depth counter. This supplements the {@link RequestTrace}-based
+     * detection for consumers that rebuild the trace chain from a different tracing system
+     * (e.g. Maven 4's {@code RequestTraceHelper} converts between Maven API traces and
+     * resolver traces, losing the {@link #REPOSITORY_SYSTEM_CALL} marker).
+     * <p>
+     * Re-entrancy is inherently per-call-stack (per-thread), so a {@code ThreadLocal} is the
+     * correct semantic. A value &gt; 0 on entry means the current thread is already inside
+     * a {@code RepositorySystem} public method. Unlike a session-scoped counter, this avoids
+     * false positives in parallel builds where multiple threads share a single session.
+     */
+    private static final ThreadLocal<int[]> REENTRY_DEPTH = ThreadLocal.withInitial(() -> new int[] {0});
+
+    /**
+     * Stamps the {@link #REPOSITORY_SYSTEM_CALL} re-entrancy marker into the trace chain
+     * while preserving the original trace tip data. The marker is inserted <em>below</em>
+     * the tip so that code walking the trace and casting {@code getData()} to its expected
+     * type (e.g. {@code org.apache.maven.artifact.Artifact}) still finds the original data
+     * at the tip rather than the anonymous marker object.
+     *
+     * @param currentTrace the current request trace (may be {@code null})
+     * @return a new trace with the marker inserted and original tip data preserved
+     */
+    private static RequestTrace stampReentrancyMarker(RequestTrace currentTrace) {
+        RequestTrace markerTrace = RequestTrace.newChild(currentTrace, REPOSITORY_SYSTEM_CALL);
+        return currentTrace != null ? RequestTrace.newChild(markerTrace, currentTrace.getData()) : markerTrace;
+    }
+
+    /**
+     * Checks whether the given {@link RequestTrace} indicates a re-entrant call by looking
+     * for the {@link #REPOSITORY_SYSTEM_CALL} marker in the trace ancestry.
+     *
+     * @return {@code true} if the marker is found (re-entrant call), {@code false} otherwise
+     */
+    private static boolean isReentrant(RequestTrace trace) {
+        for (RequestTrace t = trace; t != null; t = t.getParent()) {
+            if (t.getData() == REPOSITORY_SYSTEM_CALL) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Combined re-entrancy check using both {@link RequestTrace} ancestry and thread-scoped
+     * depth tracking. Either mechanism detecting re-entrancy is sufficient to skip validation.
+     * <p>
+     * The trace-based check is the primary mechanism and works when callers properly propagate
+     * traces. The thread-scoped check is a fallback for callers that rebuild the trace chain
+     * from a different tracing system (e.g. Maven 4's trace conversion loses the resolver's
+     * re-entrancy marker).
+     *
+     * @param trace   the current request trace (may be {@code null})
+     * @param session the current repository system session (unused, kept for signature consistency)
+     * @return {@code true} if this is a re-entrant call, {@code false} if it is the outermost call
+     */
+    private static boolean isReentrant(RequestTrace trace, RepositorySystemSession session) {
+        return isReentrant(trace) || REENTRY_DEPTH.get()[0] > 0;
+    }
+
+    /**
+     * Increments the thread-scoped re-entrancy depth counter. Must be called on every outermost
+     * entry into a public {@code RepositorySystem} method, and the returned {@link Runnable} must
+     * be invoked in a {@code finally} block to decrement the counter on exit.
+     *
+     * @param session the current repository system session (unused, kept for signature consistency)
+     * @return a {@link Runnable} that decrements the depth counter when invoked
+     */
+    private static Runnable enterSessionScope(RepositorySystemSession session) {
+        int[] depth = REENTRY_DEPTH.get();
+        depth[0]++;
+        return () -> depth[0]--;
     }
 
     private void validateSession(RepositorySystemSession session) {

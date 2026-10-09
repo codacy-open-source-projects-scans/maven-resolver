@@ -7,7 +7,7 @@
  (the "License"); you may not use this file except in compliance with
  the License.  You may obtain a copy of the License at
 
-      http://www.apache.org/licenses/LICENSE-2.0
+      https://www.apache.org/licenses/LICENSE-2.0
 
  Unless required by applicable law or agreed to in writing, software
  distributed under the License is distributed on an "AS IS" BASIS,
@@ -64,11 +64,22 @@ Furthermore, repository key function (possibly different one) is used in two com
 * Trusted Checksums Source
 * Remote Repository Filter
 
-In these cases, the repository key function only role is to provide "file system friendly" path segments based on
+In these cases, the repository key function's only role is to provide "file system friendly" path segments based on
 `RemoteRepository` instances.
 
 **Important implication:** When Resolver/Maven is reconfigured to use alternative repository key function, it is
 worthwhile to start with new, empty local repository (as keys are used in LRM maintained metadata).
+
+**Local repository provenance tracking:** the enhanced LRM records from which repository each cached artifact was
+resolved (the `_remote.repositories` files). For these tracking entries only, it defaults to the URL-qualified
+`nid_hurl` function, so that two repositories merely sharing an id — for example a repository declared by a
+transitively resolved, untrusted POM under the same id as a trusted repository — are not treated as the same
+origin in a shared local repository. This is scoped to the tracking entries: repository aggregation and (split)
+path composition keep following the system-wide function above, whose default is unchanged. If the system-wide
+function is explicitly configured, tracking follows it; the `aether.system.trackingRepositoryKeyFunction`
+configuration property, when set, overrides both. Tracking entries written under a different function than the
+active one are fail-safe: affected artifacts simply appear locally unavailable and are re-fetched (with checksum
+validation) once.
 
 ## Implemented Repository Key Functions
 

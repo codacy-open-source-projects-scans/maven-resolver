@@ -18,16 +18,13 @@
  */
 package org.eclipse.aether.internal.impl.collect;
 
-import java.lang.ref.WeakReference;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
-import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.aether.Keys;
 import org.eclipse.aether.RepositoryCache;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.artifact.Artifact;
@@ -45,6 +42,7 @@ import org.eclipse.aether.resolution.ArtifactDescriptorResult;
 import org.eclipse.aether.resolution.VersionRangeRequest;
 import org.eclipse.aether.resolution.VersionRangeResult;
 import org.eclipse.aether.util.ConfigUtils;
+import org.eclipse.aether.util.concurrency.ConcurrentWeakCache;
 import org.eclipse.aether.version.Version;
 import org.eclipse.aether.version.VersionConstraint;
 
@@ -125,13 +123,13 @@ public final class DataPool {
     public static final String CONFIG_PROP_COLLECTOR_POOL_INTERN_ARTIFACT_DESCRIPTOR_MANAGED_DEPENDENCIES =
             "aether.dependencyCollector.pool.internArtifactDescriptorManagedDependencies";
 
-    private static final String ARTIFACT_POOL = DataPool.class.getName() + "$Artifact";
+    private static final Object ARTIFACT_POOL = Keys.of(DataPool.class, "artifact");
 
-    private static final String DEPENDENCY_POOL = DataPool.class.getName() + "$Dependency";
+    private static final Object DEPENDENCY_POOL = Keys.of(DataPool.class, "dependency");
 
-    private static final String DESCRIPTORS = DataPool.class.getName() + "$Descriptors";
+    private static final Object DESCRIPTORS = Keys.of(DataPool.class, "descriptors");
 
-    private static final String DEPENDENCY_LISTS_POOL = DataPool.class.getName() + "$DependencyLists";
+    private static final Object DEPENDENCY_LISTS_POOL = Keys.of(DataPool.class, "dependencyLists");
 
     public static final ArtifactDescriptorResult NO_DESCRIPTOR =
             new ArtifactDescriptorResult(new ArtifactDescriptorRequest());
@@ -179,53 +177,34 @@ public final class DataPool {
         internArtifactDescriptorManagedDependencies = ConfigUtils.getBoolean(
                 session, true, CONFIG_PROP_COLLECTOR_POOL_INTERN_ARTIFACT_DESCRIPTOR_MANAGED_DEPENDENCIES);
 
-        InternPool<Artifact, Artifact> artifactsPool = null;
-        InternPool<Dependency, Dependency> dependenciesPool = null;
-        InternPool<DescriptorKey, Descriptor> descriptorsPool = null;
-        InternPool<List<Dependency>, List<Dependency>> dependencyListsPool = null;
+        InternPool<Artifact, Artifact> artifactsPool;
+        InternPool<Dependency, Dependency> dependenciesPool;
+        InternPool<DescriptorKey, Descriptor> descriptorsPool;
+        InternPool<List<Dependency>, List<Dependency>> dependencyListsPool;
         if (cache != null) {
-            artifactsPool = (InternPool<Artifact, Artifact>) cache.get(session, ARTIFACT_POOL);
-            dependenciesPool = (InternPool<Dependency, Dependency>) cache.get(session, DEPENDENCY_POOL);
-            descriptorsPool = (InternPool<DescriptorKey, Descriptor>) cache.get(session, DESCRIPTORS);
+            artifactsPool = (InternPool<Artifact, Artifact>) cache.computeIfAbsent(
+                    session,
+                    ARTIFACT_POOL,
+                    () -> createPool(ConfigUtils.getString(session, WEAK, CONFIG_PROP_COLLECTOR_POOL_ARTIFACT)));
+            dependenciesPool = (InternPool<Dependency, Dependency>) cache.computeIfAbsent(
+                    session,
+                    DEPENDENCY_POOL,
+                    () -> createPool(ConfigUtils.getString(session, WEAK, CONFIG_PROP_COLLECTOR_POOL_DEPENDENCY)));
+            descriptorsPool = (InternPool<DescriptorKey, Descriptor>) cache.computeIfAbsent(
+                    session,
+                    DESCRIPTORS,
+                    () -> createPool(ConfigUtils.getString(session, HARD, CONFIG_PROP_COLLECTOR_POOL_DESCRIPTOR)));
+            dependencyListsPool = (InternPool<List<Dependency>, List<Dependency>>) cache.computeIfAbsent(
+                    session,
+                    DEPENDENCY_LISTS_POOL,
+                    () -> createPool(
+                            ConfigUtils.getString(session, HARD, CONFIG_PROP_COLLECTOR_POOL_DEPENDENCY_LISTS)));
+        } else {
+            artifactsPool = createPool(ConfigUtils.getString(session, WEAK, CONFIG_PROP_COLLECTOR_POOL_ARTIFACT));
+            dependenciesPool = createPool(ConfigUtils.getString(session, WEAK, CONFIG_PROP_COLLECTOR_POOL_DEPENDENCY));
+            descriptorsPool = createPool(ConfigUtils.getString(session, HARD, CONFIG_PROP_COLLECTOR_POOL_DESCRIPTOR));
             dependencyListsPool =
-                    (InternPool<List<Dependency>, List<Dependency>>) cache.get(session, DEPENDENCY_LISTS_POOL);
-        }
-
-        if (artifactsPool == null) {
-            String artifactPoolType = ConfigUtils.getString(session, WEAK, CONFIG_PROP_COLLECTOR_POOL_ARTIFACT);
-
-            artifactsPool = createPool(artifactPoolType);
-            if (cache != null) {
-                cache.put(session, ARTIFACT_POOL, artifactsPool);
-            }
-        }
-
-        if (dependenciesPool == null) {
-            String dependencyPoolType = ConfigUtils.getString(session, WEAK, CONFIG_PROP_COLLECTOR_POOL_DEPENDENCY);
-
-            dependenciesPool = createPool(dependencyPoolType);
-            if (cache != null) {
-                cache.put(session, DEPENDENCY_POOL, dependenciesPool);
-            }
-        }
-
-        if (descriptorsPool == null) {
-            String descriptorPoolType = ConfigUtils.getString(session, HARD, CONFIG_PROP_COLLECTOR_POOL_DESCRIPTOR);
-
-            descriptorsPool = createPool(descriptorPoolType);
-            if (cache != null) {
-                cache.put(session, DESCRIPTORS, descriptorsPool);
-            }
-        }
-
-        if (dependencyListsPool == null) {
-            String dependencyListsPoolType =
-                    ConfigUtils.getString(session, HARD, CONFIG_PROP_COLLECTOR_POOL_DEPENDENCY_LISTS);
-
-            dependencyListsPool = createPool(dependencyListsPoolType);
-            if (cache != null) {
-                cache.put(session, DEPENDENCY_LISTS_POOL, dependencyListsPool);
-            }
+                    createPool(ConfigUtils.getString(session, HARD, CONFIG_PROP_COLLECTOR_POOL_DEPENDENCY_LISTS));
         }
 
         this.artifacts = artifactsPool;
@@ -246,7 +225,7 @@ public final class DataPool {
     }
 
     public DescriptorKey toKey(ArtifactDescriptorRequest request) {
-        return new DescriptorKey(request.getArtifact());
+        return new DescriptorKey(request.getArtifact(), request.getRepositories());
     }
 
     public ArtifactDescriptorResult getDescriptor(DescriptorKey key, ArtifactDescriptorRequest request) {
@@ -268,7 +247,20 @@ public final class DataPool {
     }
 
     public void putDescriptor(DescriptorKey key, ArtifactDescriptorException e) {
-        descriptors.intern(key, BadDescriptor.INSTANCE);
+        descriptors.intern(key, new BadDescriptor(e));
+    }
+
+    /**
+     * Returns the failure reason of a previously cached bad descriptor, or {@code null} if the given key does not
+     * map to a cached failure. Only the exception message is retained (not the exception itself), to avoid pinning
+     * the originating request in the session-wide pool.
+     */
+    public String getDescriptorFailure(DescriptorKey key) {
+        Descriptor descriptor = descriptors.get(key);
+        if (descriptor instanceof BadDescriptor) {
+            return ((BadDescriptor) descriptor).reason;
+        }
+        return null;
     }
 
     private List<Dependency> intern(List<Dependency> dependencies) {
@@ -311,10 +303,12 @@ public final class DataPool {
 
     public static final class DescriptorKey {
         private final Artifact artifact;
+        private final List<RemoteRepository> repositories;
         private final int hashCode;
 
-        private DescriptorKey(Artifact artifact) {
+        private DescriptorKey(Artifact artifact, List<RemoteRepository> repositories) {
             this.artifact = artifact;
+            this.repositories = repositories;
             this.hashCode = Objects.hashCode(artifact);
         }
 
@@ -327,7 +321,7 @@ public final class DataPool {
                 return false;
             }
             DescriptorKey that = (DescriptorKey) o;
-            return Objects.equals(artifact, that.artifact);
+            return Objects.equals(artifact, that.artifact) && repositoriesEquals(repositories, that.repositories);
         }
 
         @Override
@@ -337,7 +331,8 @@ public final class DataPool {
 
         @Override
         public String toString() {
-            return getClass().getSimpleName() + "{" + "artifact='" + artifact + '\'' + '}';
+            return getClass().getSimpleName() + "{" + "artifact='" + artifact + '\'' + ", repositories='" + repositories
+                    + '\'' + '}';
         }
     }
 
@@ -382,7 +377,11 @@ public final class DataPool {
 
     static final class BadDescriptor extends Descriptor {
 
-        static final BadDescriptor INSTANCE = new BadDescriptor();
+        final String reason;
+
+        BadDescriptor(ArtifactDescriptorException exception) {
+            this.reason = exception != null ? exception.getMessage() : null;
+        }
 
         public ArtifactDescriptorResult toResult(ArtifactDescriptorRequest request) {
             return NO_DESCRIPTOR;
@@ -447,41 +446,41 @@ public final class DataPool {
                 return false;
             }
             ConstraintKey that = (ConstraintKey) obj;
-            return artifact.equals(that.artifact) && equals(repositories, that.repositories);
-        }
-
-        private static boolean equals(List<RemoteRepository> repos1, List<RemoteRepository> repos2) {
-            if (repos1.size() != repos2.size()) {
-                return false;
-            }
-            for (Iterator<RemoteRepository> it1 = repos1.iterator(), it2 = repos2.iterator();
-                    it1.hasNext() && it2.hasNext(); ) {
-                RemoteRepository repo1 = it1.next();
-                RemoteRepository repo2 = it2.next();
-                if (repo1.isRepositoryManager() != repo2.isRepositoryManager()) {
-                    return false;
-                }
-                if (repo1.isRepositoryManager()) {
-                    if (!equals(repo1.getMirroredRepositories(), repo2.getMirroredRepositories())) {
-                        return false;
-                    }
-                } else if (!repo1.getUrl().equals(repo2.getUrl())) {
-                    return false;
-                } else if (repo1.getPolicy(true).isEnabled()
-                        != repo2.getPolicy(true).isEnabled()) {
-                    return false;
-                } else if (repo1.getPolicy(false).isEnabled()
-                        != repo2.getPolicy(false).isEnabled()) {
-                    return false;
-                }
-            }
-            return true;
+            return artifact.equals(that.artifact) && repositoriesEquals(repositories, that.repositories);
         }
 
         @Override
         public int hashCode() {
             return hashCode;
         }
+    }
+
+    private static boolean repositoriesEquals(List<RemoteRepository> repos1, List<RemoteRepository> repos2) {
+        if (repos1.size() != repos2.size()) {
+            return false;
+        }
+        for (Iterator<RemoteRepository> it1 = repos1.iterator(), it2 = repos2.iterator();
+                it1.hasNext() && it2.hasNext(); ) {
+            RemoteRepository repo1 = it1.next();
+            RemoteRepository repo2 = it2.next();
+            if (repo1.isRepositoryManager() != repo2.isRepositoryManager()) {
+                return false;
+            }
+            if (repo1.isRepositoryManager()) {
+                if (!repositoriesEquals(repo1.getMirroredRepositories(), repo2.getMirroredRepositories())) {
+                    return false;
+                }
+            } else if (!repo1.getUrl().equals(repo2.getUrl())) {
+                return false;
+            } else if (repo1.getPolicy(true).isEnabled()
+                    != repo2.getPolicy(true).isEnabled()) {
+                return false;
+            } else if (repo1.getPolicy(false).isEnabled()
+                    != repo2.getPolicy(false).isEnabled()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static final class GraphKey {
@@ -572,26 +571,24 @@ public final class DataPool {
         }
     }
 
+    /**
+     * Intern pool backed by ConcurrentWeakCache with weak keys and weak values.
+     * Lock-free reads (ConcurrentHashMap.get is a volatile read, zero allocation via
+     * ThreadLocal lookup key), lock-striped writes, weak keys and values allow GC of
+     * interned objects when no longer strongly referenced.
+     * Uses putIfAbsent to guarantee concurrent callers for the same key get the same instance.
+     */
     private static class WeakInternPool<K, V> implements InternPool<K, V> {
-        private final Map<K, WeakReference<V>> map = Collections.synchronizedMap(new WeakHashMap<>(256));
+        private final ConcurrentWeakCache<K, V> cache = new ConcurrentWeakCache<>(256);
 
         @Override
         public V get(K key) {
-            WeakReference<V> ref = map.get(key);
-            return ref != null ? ref.get() : null;
+            return cache.get(key);
         }
 
         @Override
         public V intern(K key, V value) {
-            WeakReference<V> pooledRef = map.get(key);
-            if (pooledRef != null) {
-                V pooled = pooledRef.get();
-                if (pooled != null) {
-                    return pooled;
-                }
-            }
-            map.put(key, new WeakReference<>(value));
-            return value;
+            return cache.putIfAbsent(key, value);
         }
     }
 }

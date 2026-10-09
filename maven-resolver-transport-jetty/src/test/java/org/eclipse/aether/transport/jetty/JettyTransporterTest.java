@@ -20,6 +20,7 @@ package org.eclipse.aether.transport.jetty;
 
 import java.util.stream.Stream;
 
+import org.eclipse.aether.ConfigurationProperties;
 import org.eclipse.aether.internal.test.util.http.HttpTransporterTest;
 import org.eclipse.aether.spi.io.PathProcessorSupport;
 import org.junit.jupiter.api.Disabled;
@@ -68,12 +69,44 @@ class JettyTransporterTest extends HttpTransporterTest {
     @Override
     @Disabled
     @Test
+    protected void testRetryHandler_tooManyRequests_withRetryAfterHeader_explicitCount_positive() {}
+
+    @Override
+    @Disabled
+    @Test
     protected void testRetryHandler_tooManyRequests_explicitCount_negative() {}
 
     @Override
     @Disabled
     @Test
     protected void testPut_Authenticated_ExpectContinueRejected_ExplicitlyConfiguredHeader() {}
+
+    @Override
+    @Disabled
+    @Test
+    protected void testGet_HTTP3FallbackToHTTP2() throws Exception {
+        // Jetty does not support version discovery: https://github.com/jetty/jetty.project/issues/15423
+    }
+
+    @Override
+    @Test
+    protected void testGet_HTTP3Only() throws Exception {
+        // Jetty's HTTP/3 support is based on Quiche which does not consider the default SSL context
+        // (https://github.com/jetty/jetty.project/issues/15370)
+        session.setConfigProperty(
+                ConfigurationProperties.HTTPS_SECURITY_MODE, ConfigurationProperties.HTTPS_SECURITY_MODE_INSECURE);
+        super.testGet_HTTP3Only();
+    }
+
+    @Override
+    @Test
+    protected void testGet_HTTP3() throws Exception {
+        // Jetty's HTTP/3 support is based on Quiche which does not consider the default SSL context
+        // (https://github.com/jetty/jetty.project/issues/15370)
+        session.setConfigProperty(
+                ConfigurationProperties.HTTPS_SECURITY_MODE, ConfigurationProperties.HTTPS_SECURITY_MODE_INSECURE);
+        super.testGet_HTTP3();
+    }
 
     public JettyTransporterTest() {
         super(() -> new JettyTransporterFactory(standardChecksumExtractor(), new PathProcessorSupport()));

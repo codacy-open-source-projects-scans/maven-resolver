@@ -18,9 +18,11 @@
  */
 package org.eclipse.aether.util.graph.transformer;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import org.eclipse.aether.RepositoryException;
@@ -28,10 +30,12 @@ import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.graph.DefaultDependencyNode;
 import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.graph.DependencyNode;
+import org.eclipse.aether.graph.DependencyVisitor;
 import org.eclipse.aether.internal.test.util.DependencyGraphParser;
 import org.eclipse.aether.internal.test.util.TestVersion;
 import org.eclipse.aether.internal.test.util.TestVersionConstraint;
 import org.eclipse.aether.util.graph.visitor.DependencyGraphDumper;
+import org.eclipse.aether.util.graph.visitor.TreeDependencyVisitor;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -483,6 +487,8 @@ public final class ConflictResolverTest extends AbstractConflictResolverTest {
             System.out.println("CR=" + conflictResolver.getClass().getSimpleName() + "; verbosity=" + verbosity.name());
             if (!cyclesLeftInPlace) {
                 transformed.accept(DUMPER_SOUT);
+            } else {
+                transformed.accept(new TreeDependencyVisitor(DUMPER_SOUT));
             }
 
             assertSame(transformed, root);
@@ -522,16 +528,446 @@ public final class ConflictResolverTest extends AbstractConflictResolverTest {
         }
     }
 
+    @ParameterizedTest
+    @MethodSource("conflictResolverSource")
+    void subtreeRepeatedSameInstance(ConflictResolver conflictResolver) throws RepositoryException {
+        // root -> d1 ----> st1* -> st2 -> st3
+        //   |---> st1* --> st2 --> st3
+        //          |-----> st3
+        // Note: st1* are TWO DIFFERENT instances, but st2->st3 are same instances on different paths
+        DependencyNode root = makeDependencyNode("some-group", "root", "1.0");
+        DependencyNode d1 = makeDependencyNode("some-group", "d1", "1.0");
+        DependencyNode st1a = makeDependencyNode("some-group", "st1", "1.0");
+        DependencyNode st1b = makeDependencyNode("some-group", "st1", "1.0");
+        DependencyNode st2 = makeDependencyNode("some-group", "st2", "1.0");
+        DependencyNode st3 = makeDependencyNode("some-group", "st3", "1.0");
+
+        root.setChildren(mutableList(d1, st1b));
+        d1.setChildren(mutableList(st1a));
+        st1a.setChildren(mutableList(st2));
+        st2.setChildren(mutableList(st3));
+        st1b.setChildren(mutableList(st2, st3));
+
+        System.out.println();
+        System.out.println("Input node:");
+        root.accept(DUMPER_SOUT);
+
+        DependencyNode transformedRoot = transform(conflictResolver, root);
+
+        System.out.println();
+        System.out.println("Transformed node:");
+        transformedRoot.accept(DUMPER_SOUT);
+
+        assertSame(transformedRoot, root);
+        AtomicInteger occurrenceOfSt3 = new AtomicInteger(0);
+        root.accept(new DependencyVisitor() {
+            @Override
+            public boolean visitEnter(DependencyNode node) {
+                if (node.getArtifact() != null
+                        && node.getArtifact().getArtifactId().equals("st3")) {
+                    occurrenceOfSt3.incrementAndGet();
+                }
+                return true;
+            }
+
+            @Override
+            public boolean visitLeave(DependencyNode node) {
+                return true;
+            }
+        });
+        assertEquals(1, occurrenceOfSt3.get()); // st3 must be present only once in tree
+    }
+
+    @ParameterizedTest
+    @MethodSource("conflictResolverSource")
+    void subtreeRepeatedSameInstanceWithRealCycle(ConflictResolver conflictResolver) throws RepositoryException {
+        // root -> d1 ----> st1* -> st2 -> st3
+        //   |---> st1* --> st2 --> st3* -> st2
+        //          |-----> st3
+        // Note: st1* are TWO DIFFERENT instances, but st2->st3 are same instances on different paths
+        // Note: st3* are TWO DIFFERENT instances
+        DependencyNode root = makeDependencyNode("some-group", "root", "1.0");
+        DependencyNode d1 = makeDependencyNode("some-group", "d1", "1.0");
+        DependencyNode st1a = makeDependencyNode("some-group", "st1", "1.0");
+        DependencyNode st1b = makeDependencyNode("some-group", "st1", "1.0");
+        DependencyNode st2 = makeDependencyNode("some-group", "st2", "1.0");
+        DependencyNode st3 = makeDependencyNode("some-group", "st3", "1.0");
+        DependencyNode st3a = makeDependencyNode("some-group", "st3", "1.0");
+
+        root.setChildren(mutableList(d1, st1b));
+        d1.setChildren(mutableList(st1a));
+        st1a.setChildren(mutableList(st2));
+        st2.setChildren(mutableList(st3a));
+        st1b.setChildren(mutableList(st2, st3));
+        st3a.setChildren(mutableList(st2));
+
+        System.out.println();
+        System.out.println("Input node:");
+        root.accept(new TreeDependencyVisitor(DUMPER_SOUT)); // we have a cycle, so must wrap it
+
+        DependencyNode transformedRoot = transform(conflictResolver, root);
+
+        System.out.println();
+        System.out.println("Transformed node:");
+        // transformedRoot.accept(DUMPER_SOUT);
+
+        assertSame(transformedRoot, root);
+        AtomicInteger occurrenceOfSt3 = new AtomicInteger(0);
+        root.accept(new DependencyVisitor() {
+            @Override
+            public boolean visitEnter(DependencyNode node) {
+                if (node.getArtifact() != null
+                        && node.getArtifact().getArtifactId().equals("st3")) {
+                    occurrenceOfSt3.incrementAndGet();
+                }
+                return true;
+            }
+
+            @Override
+            public boolean visitLeave(DependencyNode node) {
+                return true;
+            }
+        });
+        assertEquals(1, occurrenceOfSt3.get()); // st3 must be present only once in tree
+    }
+
+    @ParameterizedTest
+    @MethodSource("conflictResolverSource")
+    void nettyBoringSslExample(ConflictResolver conflictResolver) throws RepositoryException {
+        // root -> nbc1 ---> nbc2
+        //   |---> nbc2 ---> nbc1
+        DependencyNode root = makeDependencyNode("some-group", "root", "1.0");
+        DependencyNode nbc1 = makeDependencyNode("some-group", "nbc", "1.0", "arch1", "compile");
+        DependencyNode nbc2 = makeDependencyNode("some-group", "nbc", "1.0", "arch2", "compile");
+
+        root.setChildren(mutableList(nbc1, nbc2));
+        nbc1.setChildren(mutableList(nbc2));
+        nbc2.setChildren(mutableList(nbc1));
+
+        System.out.println();
+        System.out.println("Input node:");
+        root.accept(new TreeDependencyVisitor(DUMPER_SOUT)); // we have a cycle, so must wrap it
+
+        DependencyNode transformedRoot = transform(conflictResolver, root);
+
+        System.out.println();
+        System.out.println("Transformed node:");
+        transformedRoot.accept(DUMPER_SOUT);
+
+        assertSame(transformedRoot, root);
+        AtomicInteger occurrence = new AtomicInteger(0);
+        root.accept(new DependencyVisitor() {
+            @Override
+            public boolean visitEnter(DependencyNode node) {
+                if (node.getArtifact() != null
+                        && node.getArtifact().getArtifactId().equals("nbc")) {
+                    occurrence.incrementAndGet();
+                }
+                return true;
+            }
+
+            @Override
+            public boolean visitLeave(DependencyNode node) {
+                return true;
+            }
+        });
+        assertEquals(2, occurrence.get()); // st3 must be present only once in tree
+    }
+
+    @ParameterizedTest
+    @MethodSource("conflictResolverSource")
+    void issue1903(ConflictResolver conflictResolver) throws RepositoryException {
+        // The "dom4j:dom4j:1.6.1" case
+        // root -> A -> B (in cycle with A via cyclicPredecessors) -> C (unique, only reachable through B)
+        //                                                         -> A' (same conflictId as A, actual cycle)
+        DependencyNode root = makeDependencyNode("some-group", "root", "1.0");
+        DependencyNode aPrim = makeDependencyNode("some-group", "a", "1.0", "compile");
+        DependencyNode aSec = makeDependencyNode("some-group", "a", "1.1", "compile");
+        DependencyNode b = makeDependencyNode("some-group", "b", "1.0", "compile");
+        DependencyNode c = makeDependencyNode("some-group", "c", "1.0", "compile");
+
+        root.setChildren(mutableList(aPrim));
+        aPrim.setChildren(mutableList(b));
+        b.setChildren(mutableList(c, aSec));
+        aSec.setChildren(mutableList(b));
+
+        System.out.println();
+        System.out.println("Input node:");
+        root.accept(new TreeDependencyVisitor(DUMPER_SOUT)); // we have a cycle, so must wrap it
+
+        DependencyNode transformedRoot = transform(conflictResolver, root);
+
+        System.out.println();
+        System.out.println("Transformed node:");
+        transformedRoot.accept(DUMPER_SOUT);
+
+        assertSame(transformedRoot, root);
+        AtomicInteger occurrence = new AtomicInteger(0);
+        root.accept(new DependencyVisitor() {
+            @Override
+            public boolean visitEnter(DependencyNode node) {
+                if (node.getArtifact() != null
+                        && node.getArtifact().getArtifactId().equals("a")) {
+                    occurrence.incrementAndGet();
+                }
+                return true;
+            }
+
+            @Override
+            public boolean visitLeave(DependencyNode node) {
+                return true;
+            }
+        });
+        assertEquals(1, occurrence.get()); // a must be present only once in tree
+    }
+
+    // ---- Auto-selection / delegating ConflictResolver tests ----
+
+    /**
+     * Verifies that the delegating {@link ConflictResolver} with {@code "auto"} mode (default)
+     * correctly resolves conflicts. The auto-selection heuristic chooses between PathConflictResolver
+     * and ClassicConflictResolver based on available memory; this test confirms the delegation
+     * produces the same correct result regardless of which implementation is selected.
+     */
+    @org.junit.jupiter.api.Test
+    void autoSelectionResolvesConflictsCorrectly() throws RepositoryException {
+        // explicit "auto" config
+        session.setConfigProperty(ConflictResolver.CONFIG_PROP_CONFLICT_RESOLVER_IMPL, "auto");
+        ConflictResolver delegating = new ConflictResolver(
+                new NearestVersionSelector(),
+                new JavaScopeSelector(),
+                new SimpleOptionalitySelector(),
+                new JavaScopeDeriver());
+
+        // Foo -> Bar -> Baz 2.0
+        //  |---> Baz 1.0
+        DependencyNode fooNode = makeDependencyNode("some-group", "foo", "1.0");
+        DependencyNode barNode = makeDependencyNode("some-group", "bar", "1.0");
+        DependencyNode baz1Node = makeDependencyNode("some-group", "baz", "1.0");
+        DependencyNode baz2Node = makeDependencyNode("some-group", "baz", "2.0");
+        fooNode.setChildren(mutableList(barNode, baz1Node));
+        barNode.setChildren(mutableList(baz2Node));
+
+        DependencyNode transformedNode = transform(delegating, fooNode);
+
+        assertSame(fooNode, transformedNode);
+        assertEquals(2, fooNode.getChildren().size());
+        assertSame(barNode, fooNode.getChildren().get(0));
+        assertTrue(barNode.getChildren().isEmpty());
+        assertSame(baz1Node, fooNode.getChildren().get(1));
+    }
+
+    /**
+     * Verifies that the delegating {@link ConflictResolver} with explicit {@code "path"} config
+     * correctly selects PathConflictResolver.
+     */
+    @org.junit.jupiter.api.Test
+    void explicitPathConfigResolvesConflicts() throws RepositoryException {
+        session.setConfigProperty(ConflictResolver.CONFIG_PROP_CONFLICT_RESOLVER_IMPL, "path");
+        ConflictResolver delegating = new ConflictResolver(
+                new NearestVersionSelector(),
+                new JavaScopeSelector(),
+                new SimpleOptionalitySelector(),
+                new JavaScopeDeriver());
+
+        DependencyNode fooNode = makeDependencyNode("some-group", "foo", "1.0");
+        DependencyNode barNode = makeDependencyNode("some-group", "bar", "1.0");
+        DependencyNode baz1Node = makeDependencyNode("some-group", "baz", "1.0");
+        DependencyNode baz2Node = makeDependencyNode("some-group", "baz", "2.0");
+        fooNode.setChildren(mutableList(barNode, baz1Node));
+        barNode.setChildren(mutableList(baz2Node));
+
+        DependencyNode transformedNode = transform(delegating, fooNode);
+
+        assertSame(fooNode, transformedNode);
+        assertEquals(2, fooNode.getChildren().size());
+        assertTrue(barNode.getChildren().isEmpty());
+        assertSame(baz1Node, fooNode.getChildren().get(1));
+    }
+
+    /**
+     * Verifies that the delegating {@link ConflictResolver} with explicit {@code "classic"} config
+     * correctly selects ClassicConflictResolver.
+     */
+    @org.junit.jupiter.api.Test
+    void explicitClassicConfigResolvesConflicts() throws RepositoryException {
+        session.setConfigProperty(ConflictResolver.CONFIG_PROP_CONFLICT_RESOLVER_IMPL, "classic");
+        ConflictResolver delegating = new ConflictResolver(
+                new NearestVersionSelector(),
+                new JavaScopeSelector(),
+                new SimpleOptionalitySelector(),
+                new JavaScopeDeriver());
+
+        DependencyNode fooNode = makeDependencyNode("some-group", "foo", "1.0");
+        DependencyNode barNode = makeDependencyNode("some-group", "bar", "1.0");
+        DependencyNode baz1Node = makeDependencyNode("some-group", "baz", "1.0");
+        DependencyNode baz2Node = makeDependencyNode("some-group", "baz", "2.0");
+        fooNode.setChildren(mutableList(barNode, baz1Node));
+        barNode.setChildren(mutableList(baz2Node));
+
+        DependencyNode transformedNode = transform(delegating, fooNode);
+
+        assertSame(fooNode, transformedNode);
+        assertEquals(2, fooNode.getChildren().size());
+        assertTrue(barNode.getChildren().isEmpty());
+        assertSame(baz1Node, fooNode.getChildren().get(1));
+    }
+
+    /**
+     * Verifies that the delegating {@link ConflictResolver} rejects an unknown config value.
+     */
+    @org.junit.jupiter.api.Test
+    void unknownConfigThrows() {
+        session.setConfigProperty(ConflictResolver.CONFIG_PROP_CONFLICT_RESOLVER_IMPL, "bogus");
+        ConflictResolver delegating = new ConflictResolver(
+                new NearestVersionSelector(),
+                new JavaScopeSelector(),
+                new SimpleOptionalitySelector(),
+                new JavaScopeDeriver());
+
+        DependencyNode fooNode = makeDependencyNode("some-group", "foo", "1.0");
+        DependencyNode barNode = makeDependencyNode("some-group", "bar", "1.0");
+        fooNode.setChildren(mutableList(barNode));
+
+        assertThrows(IllegalArgumentException.class, () -> transform(delegating, fooNode));
+    }
+
+    /**
+     * Verifies that the default config (no explicit setting) works — exercises the auto-selection
+     * code path with default config properties.
+     */
+    @org.junit.jupiter.api.Test
+    void defaultConfigUsesAutoSelection() throws RepositoryException {
+        // No explicit config property set — should use AUTO_CONFLICT_RESOLVER default
+        ConflictResolver delegating = new ConflictResolver(
+                new NearestVersionSelector(),
+                new JavaScopeSelector(),
+                new SimpleOptionalitySelector(),
+                new JavaScopeDeriver());
+
+        DependencyNode fooNode = makeDependencyNode("some-group", "foo", "1.0");
+        DependencyNode barNode = makeDependencyNode("some-group", "bar", "1.0");
+        DependencyNode baz1Node = makeDependencyNode("some-group", "baz", "1.0");
+        DependencyNode baz2Node = makeDependencyNode("some-group", "baz", "2.0");
+        fooNode.setChildren(mutableList(barNode, baz1Node));
+        barNode.setChildren(mutableList(baz2Node));
+
+        DependencyNode transformedNode = transform(delegating, fooNode);
+
+        assertSame(fooNode, transformedNode);
+        assertEquals(2, fooNode.getChildren().size());
+        assertTrue(barNode.getChildren().isEmpty());
+        assertSame(baz1Node, fooNode.getChildren().get(1));
+    }
+
     private static DependencyNode makeDependencyNode(String groupId, String artifactId, String version) {
         return makeDependencyNode(groupId, artifactId, version, "compile");
     }
 
     private static DependencyNode makeDependencyNode(String groupId, String artifactId, String version, String scope) {
-        DefaultDependencyNode node = new DefaultDependencyNode(
-                new Dependency(new DefaultArtifact(groupId + ':' + artifactId + ':' + version), scope));
+        return makeDependencyNode(groupId, artifactId, version, null, "compile");
+    }
+
+    private static DependencyNode makeDependencyNode(
+            String groupId, String artifactId, String version, String classifier, String scope) {
+        DefaultDependencyNode node = (classifier != null && !classifier.isEmpty())
+                ? new DefaultDependencyNode(new Dependency(
+                        new DefaultArtifact(groupId + ':' + artifactId + ":jar:" + classifier + ":" + version), scope))
+                : new DefaultDependencyNode(
+                        new Dependency(new DefaultArtifact(groupId + ':' + artifactId + ':' + version), scope));
         node.setVersion(new TestVersion(version));
         node.setVersionConstraint(new TestVersionConstraint(node.getVersion()));
         return node;
+    }
+
+    /**
+     * Regression test for exponential Path creation (OOM) in dense dependency graphs.
+     * <p>
+     * Constructs a 3-level graph where hub nodes (which have their own shared children)
+     * are each reachable via M distinct parent paths:
+     * <pre>
+     *   root → p0, p1, … p(M-1)              (M parent modules)
+     *   each pi → hub0, hub1, … hub(N-1)      (N shared hub nodes, with children)
+     *   each hub → sub0, sub1, … sub(K-1)     (K shared sub-hub leaf nodes)
+     * </pre>
+     * Without the {@code expandedNodes} guard in {@link PathConflictResolver#gatherCRNodes},
+     * each hub node would be pushed onto the expansion stack M times (once per parent),
+     * causing its K sub-hubs to be expanded M times each. Every expansion adds new
+     * {@code Path} objects to the conflict partitions, so without the guard:
+     * M×N paths are created for hubs and M×N×K paths for sub-hubs in the partitions.
+     * With M=N=K=100 that is 100×100 + 100×100×100 = 1,010,000 {@code Path} objects,
+     * consuming ~80 MB of heap and triggering {@link OutOfMemoryError} on CI.
+     * <p>
+     * With the fix, only N+K = 200 unique nodes are expanded, regardless of M.
+     * The {@link #assertTimeout} bound of 5 seconds provides an additional safety net:
+     * even if heap is generous enough to avoid OOM, the quadratic work would take seconds.
+     */
+    @ParameterizedTest
+    @MethodSource("conflictResolverSource")
+    void denseGraphDoesNotOom(ConflictResolver conflictResolver) throws RepositoryException {
+        // M=N=K=100: without the fix, creates M*N + M*N*K = 1,010,000 Path objects (~80 MB)
+        // → OutOfMemoryError on CI. With the fix: O(N+K) = 200 expansions, trivial memory.
+        int M = 100; // parent modules
+        int N = 100; // hub modules (shared, each with children)
+        int K = 100; // sub-hub leaf modules (shared across hubs)
+
+        DependencyNode root = makeDependencyNode("test", "root", "1.0");
+
+        // K shared leaf sub-hub nodes (shared instances across all hubs)
+        List<DependencyNode> subHubs = new ArrayList<>(K);
+        for (int s = 0; s < K; s++) {
+            subHubs.add(makeDependencyNode("test", "sub-hub-" + s, "1.0"));
+        }
+
+        // N shared hub nodes, each depending on all K sub-hubs (shared instances)
+        List<DependencyNode> hubs = new ArrayList<>(N);
+        for (int h = 0; h < N; h++) {
+            DependencyNode hub = makeDependencyNode("test", "hub-" + h, "1.0");
+            hub.setChildren(new ArrayList<>(subHubs));
+            hubs.add(hub);
+        }
+
+        // M parent nodes, each depending on all N hubs (shared instances)
+        List<DependencyNode> parents = new ArrayList<>(M);
+        for (int p = 0; p < M; p++) {
+            DependencyNode parent = makeDependencyNode("test", "parent-" + p, "1.0");
+            parent.setChildren(new ArrayList<>(hubs));
+            parents.add(parent);
+        }
+        root.setChildren(parents);
+
+        // Must complete without OOM, StackOverflowError, and within a time bound that
+        // would expire on the pathological (un-fixed) expansion pattern.
+        DependencyNode result = assertTimeout(Duration.ofSeconds(5), () -> transform(conflictResolver, root));
+        assertNotNull(result);
+
+        // All parents must survive (no conflicts among them)
+        assertEquals(M, result.getChildren().size());
+
+        // All hub and sub-hub nodes must be reachable somewhere in the resolved graph
+        AtomicInteger hubCount = new AtomicInteger();
+        AtomicInteger subHubCount = new AtomicInteger();
+        result.accept(new TreeDependencyVisitor(new DependencyVisitor() {
+            @Override
+            public boolean visitEnter(DependencyNode node) {
+                if (node.getArtifact() != null) {
+                    String id = node.getArtifact().getArtifactId();
+                    if (id.startsWith("hub-") && !id.startsWith("hub-sub")) {
+                        hubCount.incrementAndGet();
+                    } else if (id.startsWith("sub-hub-")) {
+                        subHubCount.incrementAndGet();
+                    }
+                }
+                return true;
+            }
+
+            @Override
+            public boolean visitLeave(DependencyNode node) {
+                return true;
+            }
+        }));
+        assertEquals(N, hubCount.get(), "All hub nodes must survive in the resolved graph");
+        assertEquals(K, subHubCount.get(), "All sub-hub nodes must survive in the resolved graph");
     }
 
     private static List<DependencyNode> mutableList(DependencyNode... nodes) {

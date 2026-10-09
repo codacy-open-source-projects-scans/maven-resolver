@@ -18,6 +18,8 @@
  */
 package org.eclipse.aether.transport.apache;
 
+import javax.net.ssl.SSLSession;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
@@ -33,16 +35,22 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 
 import org.apache.http.Header;
+import org.apache.http.HttpClientConnection;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpEntityEnclosingRequest;
+import org.apache.http.HttpException;
 import org.apache.http.HttpHeaders;
 import org.apache.http.HttpHost;
+import org.apache.http.HttpRequest;
 import org.apache.http.HttpResponse;
 import org.apache.http.HttpStatus;
+import org.apache.http.ProtocolVersion;
+import org.apache.http.auth.AuthScheme;
 import org.apache.http.auth.AuthSchemeProvider;
 import org.apache.http.auth.AuthScope;
 import org.apache.http.client.AuthCache;
@@ -64,6 +72,7 @@ import org.apache.http.client.utils.URIUtils;
 import org.apache.http.config.Registry;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.config.SocketConfig;
+import org.apache.http.conn.ManagedHttpClientConnection;
 import org.apache.http.entity.AbstractHttpEntity;
 import org.apache.http.entity.ByteArrayEntity;
 import org.apache.http.impl.NoConnectionReuseStrategy;
@@ -73,14 +82,15 @@ import org.apache.http.impl.auth.DigestSchemeFactory;
 import org.apache.http.impl.auth.KerberosSchemeFactory;
 import org.apache.http.impl.auth.NTLMSchemeFactory;
 import org.apache.http.impl.auth.SPNegoSchemeFactory;
-import org.apache.http.impl.client.BasicAuthCache;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.DefaultHttpRequestRetryHandler;
 import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.client.LaxRedirectStrategy;
 import org.apache.http.impl.client.StandardHttpRequestRetryHandler;
 import org.apache.http.protocol.HttpContext;
+import org.apache.http.protocol.HttpCoreContext;
+import org.apache.http.protocol.HttpRequestExecutor;
 import org.apache.http.util.EntityUtils;
+import org.eclipse.aether.Keys;
 import org.eclipse.aether.RepositorySystemSession;
 import org.eclipse.aether.repository.AuthenticationContext;
 import org.eclipse.aether.repository.Proxy;
@@ -89,13 +99,17 @@ import org.eclipse.aether.spi.connector.transport.AbstractTransporter;
 import org.eclipse.aether.spi.connector.transport.GetTask;
 import org.eclipse.aether.spi.connector.transport.PeekTask;
 import org.eclipse.aether.spi.connector.transport.PutTask;
+import org.eclipse.aether.spi.connector.transport.TransportListener;
 import org.eclipse.aether.spi.connector.transport.TransportTask;
 import org.eclipse.aether.spi.connector.transport.http.ChecksumExtractor;
+import org.eclipse.aether.spi.connector.transport.http.HttpTransportPropertiesBuilder;
 import org.eclipse.aether.spi.connector.transport.http.HttpTransporter;
 import org.eclipse.aether.spi.connector.transport.http.HttpTransporterException;
 import org.eclipse.aether.spi.io.PathProcessor;
+import org.eclipse.aether.transfer.HttpTransportProperty.HttpVersion;
 import org.eclipse.aether.transfer.NoTransporterException;
 import org.eclipse.aether.transfer.TransferCancelledException;
+import org.eclipse.aether.transfer.TransferEvent;
 import org.eclipse.aether.util.ConfigUtils;
 import org.eclipse.aether.util.StringDigestUtil;
 import org.eclipse.aether.util.connector.transport.http.HttpTransporterUtils;
@@ -104,11 +118,13 @@ import org.slf4j.LoggerFactory;
 
 import static java.util.Objects.requireNonNull;
 import static org.eclipse.aether.spi.connector.transport.http.HttpConstants.CONTENT_RANGE_PATTERN;
+import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.CONFIG_PROP_FOLLOW_INSECURE_REDIRECTS;
 import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.CONFIG_PROP_FOLLOW_REDIRECTS;
 import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.CONFIG_PROP_HTTP_RETRY_HANDLER_NAME;
 import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.CONFIG_PROP_HTTP_RETRY_HANDLER_REQUEST_SENT_ENABLED;
 import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.CONFIG_PROP_MAX_REDIRECTS;
 import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.CONFIG_PROP_USE_SYSTEM_PROPERTIES;
+import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.DEFAULT_FOLLOW_INSECURE_REDIRECTS;
 import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.DEFAULT_FOLLOW_REDIRECTS;
 import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.DEFAULT_HTTP_RETRY_HANDLER_REQUEST_SENT_ENABLED;
 import static org.eclipse.aether.transport.apache.ApacheTransporterConfigurationKeys.DEFAULT_MAX_REDIRECTS;
@@ -120,6 +136,11 @@ import static org.eclipse.aether.transport.apache.ApacheTransporterConfiguration
  * A transporter for HTTP/HTTPS.
  */
 final class ApacheTransporter extends AbstractTransporter implements HttpTransporter {
+    /**
+     * Custom context attribute name to store the SSL session in the HTTP context. This is populated by a custom request executor.
+     */
+    private static final String CONTEXT_ATTRIBUTE_NAME_SSL_SESSION = "ssl.session";
+
     private static final Logger LOGGER = LoggerFactory.getLogger(ApacheTransporter.class);
 
     private final ChecksumExtractor checksumExtractor;
@@ -148,6 +169,8 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
 
     private final boolean supportWebDav;
 
+    private final boolean sendRfc9457Accept;
+
     private final AuthCache authCache;
 
     @SuppressWarnings("checkstyle:methodlength")
@@ -160,10 +183,7 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
         this.checksumExtractor = checksumExtractor;
         this.pathProcessor = pathProcessor;
         try {
-            this.baseUri = new URI(repository.getUrl()).parseServerAuthority();
-            if (baseUri.isOpaque()) {
-                throw new URISyntaxException(repository.getUrl(), "URL must not be opaque");
-            }
+            this.baseUri = HttpTransporterUtils.getBaseUri(repository);
             this.server = URIUtils.extractHost(baseUri);
             if (server == null) {
                 throw new URISyntaxException(repository.getUrl(), "URL lacks host name");
@@ -189,6 +209,7 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
         this.preemptiveAuth = HttpTransporterUtils.isHttpPreemptiveAuth(session, repository);
         this.preemptivePutAuth = HttpTransporterUtils.isHttpPreemptivePutAuth(session, repository);
         this.supportWebDav = HttpTransporterUtils.isHttpSupportWebDav(session, repository);
+        this.sendRfc9457Accept = HttpTransporterUtils.isHttpSendRfc9457Accept(session, repository);
         int connectTimeout = HttpTransporterUtils.getHttpConnectTimeout(session, repository);
         int requestTimeout = HttpTransporterUtils.getHttpRequestTimeout(session, repository);
         int retryCount = HttpTransporterUtils.getHttpRetryHandlerCount(session, repository);
@@ -214,6 +235,11 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
                 DEFAULT_FOLLOW_REDIRECTS,
                 CONFIG_PROP_FOLLOW_REDIRECTS + "." + repository.getId(),
                 CONFIG_PROP_FOLLOW_REDIRECTS);
+        boolean followInsecureRedirects = ConfigUtils.getBoolean(
+                session,
+                DEFAULT_FOLLOW_INSECURE_REDIRECTS,
+                CONFIG_PROP_FOLLOW_INSECURE_REDIRECTS + "." + repository.getId(),
+                CONFIG_PROP_FOLLOW_INSECURE_REDIRECTS);
         String userAgent = HttpTransporterUtils.getUserAgent(session, repository);
 
         Charset credentialsCharset = HttpTransporterUtils.getHttpCredentialsEncoding(session, repository);
@@ -259,7 +285,7 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
 
         HttpClientBuilder builder = HttpClientBuilder.create()
                 .setUserAgent(userAgent)
-                .setRedirectStrategy(LaxRedirectStrategy.INSTANCE)
+                .setRedirectStrategy(new ResolverRedirectStrategy(followInsecureRedirects))
                 .setDefaultSocketConfig(socketConfig)
                 .setDefaultRequestConfig(requestConfig)
                 .setServiceUnavailableRetryStrategy(serviceUnavailableRetryStrategy)
@@ -269,6 +295,16 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
                 .setConnectionManagerShared(true)
                 .setDefaultCredentialsProvider(toCredentialsProvider(server, repoAuthContext, proxy, proxyAuthContext))
                 .setProxy(proxy);
+        if (ConfigUtils.getBoolean(
+                session,
+                ApacheTransporterConfigurationKeys.DEFAULT_ORIGIN_SCOPED_HEADERS,
+                ApacheTransporterConfigurationKeys.CONFIG_PROP_ORIGIN_SCOPED_HEADERS + "." + repository.getId(),
+                ApacheTransporterConfigurationKeys.CONFIG_PROP_ORIGIN_SCOPED_HEADERS)) {
+            // Configured headers are per-repository data and frequently carry credentials; scope them to the
+            // repository origin so a cross-origin redirect hop does not replay them to the redirect target.
+            // Challenge-based credentials are host-scoped by the credentials provider already.
+            builder.addInterceptorLast(new OriginScopedHeadersInterceptor(server, this.headers.keySet()));
+        }
         final boolean useSystemProperties = ConfigUtils.getBoolean(
                 session,
                 DEFAULT_USE_SYSTEM_PROPERTIES,
@@ -279,7 +315,24 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
                     "Transport used Apache HttpClient is instructed to use system properties: this may yield in unwanted side-effects!");
             LOGGER.warn("Please use documented means to configure resolver transport.");
             builder.useSystemProperties();
+            SystemProxyAuthenticationStrategy systemProxyAuth = new SystemProxyAuthenticationStrategy();
+            builder.setProxyAuthenticationStrategy(systemProxyAuth);
+            builder.addInterceptorFirst(systemProxyAuth);
         }
+
+        // capture SSL session for logging purposes (https://issues.apache.org/jira/browse/HTTPCLIENT-2164)
+        builder.setRequestExecutor(new HttpRequestExecutor() {
+
+            @Override
+            public HttpResponse execute(HttpRequest request, HttpClientConnection conn, HttpContext context)
+                    throws IOException, HttpException {
+                if (conn instanceof ManagedHttpClientConnection) {
+                    context.setAttribute(
+                            CONTEXT_ATTRIBUTE_NAME_SSL_SESSION, ((ManagedHttpClientConnection) conn).getSSLSession());
+                }
+                return super.execute(request, conn, context);
+            }
+        });
 
         HttpTransporterUtils.getHttpExpectContinue(session, repository).ifPresent(state::setExpectContinue);
         if (!HttpTransporterUtils.isHttpReuseConnections(session, repository)) {
@@ -287,11 +340,15 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
         }
 
         if (session.getCache() != null) {
-            String authCacheKey = getClass().getSimpleName() + "-" + repository.getId() + "-"
-                    + StringDigestUtil.sha1(repository.toString());
-            this.authCache = (AuthCache) session.getCache().computeIfAbsent(session, authCacheKey, BasicAuthCache::new);
+            this.authCache = (AuthCache) session.getCache()
+                    .computeIfAbsent(
+                            session,
+                            Keys.of(
+                                    getClass(),
+                                    repository.getId() + "-" + StringDigestUtil.sha1(repository.toString())),
+                            ConcurrentAuthCache::new);
         } else {
-            this.authCache = new BasicAuthCache();
+            this.authCache = new ConcurrentAuthCache();
         }
         this.client = builder.build();
     }
@@ -310,12 +367,27 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
 
     private static CredentialsProvider toCredentialsProvider(
             HttpHost server, AuthenticationContext serverAuthCtx, HttpHost proxy, AuthenticationContext proxyAuthCtx) {
-        CredentialsProvider provider = toCredentialsProvider(server.getHostName(), AuthScope.ANY_PORT, serverAuthCtx);
+        CredentialsProvider provider =
+                toCredentialsProvider(server.getHostName(), effectivePort(server), serverAuthCtx);
         if (proxy != null) {
             CredentialsProvider p = toCredentialsProvider(proxy.getHostName(), proxy.getPort(), proxyAuthCtx);
             provider = new DemuxCredentialsProvider(provider, p, proxy);
         }
         return provider;
+    }
+
+    /**
+     * Determines the effective port of the given host: the explicit port if present, otherwise the default port
+     * implied by the scheme. Used to bind repository credentials to the repository's own origin (host and port)
+     * instead of {@link AuthScope#ANY_PORT}: with any-port scoping, a request landing on the same host but a
+     * different port - for example after an https-to-http downgrade redirect - would still be eligible to
+     * receive the credentials.
+     */
+    static int effectivePort(HttpHost host) {
+        if (host.getPort() >= 0) {
+            return host.getPort();
+        }
+        return "https".equalsIgnoreCase(host.getSchemeName()) ? 443 : 80;
     }
 
     private static CredentialsProvider toCredentialsProvider(String host, int port, AuthenticationContext ctx) {
@@ -342,7 +414,7 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
     protected void implPeek(PeekTask task) throws Exception {
         HttpHead request = commonHeaders(new HttpHead(resolve(task)));
         try {
-            execute(request, null);
+            execute(request, null, task.getListener());
         } catch (HttpResponseException e) {
             throw new HttpTransporterException(e.getStatusCode());
         }
@@ -354,13 +426,15 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
 
         EntityGetter getter = new EntityGetter(task);
         HttpGet request = commonHeaders(new HttpGet(resolve(task)));
-        ApacheRFC9457Reporter.INSTANCE.prepareRequest(request);
+        if (sendRfc9457Accept) {
+            ApacheRFC9457Reporter.INSTANCE.prepareRequest(request);
+        }
         while (true) {
             try {
                 if (resume) {
                     resume(request, task);
                 }
-                execute(request, getter);
+                execute(request, getter, task.getListener());
                 break;
             } catch (HttpResponseException e) {
                 if (resume
@@ -379,27 +453,32 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
     protected void implPut(PutTask task) throws Exception {
         PutTaskEntity entity = new PutTaskEntity(task);
         HttpPut request = commonHeaders(entity(new HttpPut(resolve(task)), entity));
-        ApacheRFC9457Reporter.INSTANCE.prepareRequest(request);
+        if (sendRfc9457Accept) {
+            ApacheRFC9457Reporter.INSTANCE.prepareRequest(request);
+        }
         try {
-            execute(request, null);
+            execute(request, null, task.getListener());
         } catch (HttpResponseException e) {
             if (e.getStatusCode() == HttpStatus.SC_EXPECTATION_FAILED && request.containsHeader(HttpHeaders.EXPECT)) {
                 state.setExpectContinue(false);
                 request = commonHeaders(entity(new HttpPut(request.getURI()), entity));
-                execute(request, null);
+                execute(request, null, task.getListener());
                 return;
             }
             throw new HttpTransporterException(e.getStatusCode());
         }
     }
 
-    private void execute(HttpUriRequest request, EntityGetter getter) throws Exception {
+    private void execute(HttpUriRequest request, EntityGetter getter, TransportListener listener) throws Exception {
         try {
             SharingHttpContext context = new SharingHttpContext(state);
             context.setAuthCache(authCache);
             prepare(request, context);
             try (CloseableHttpResponse response = client.execute(server, request, context)) {
                 try {
+                    Map<TransferEvent.TransportPropertyKey, Object> transportProperties =
+                            createTransportProperties(response, context);
+                    listener.transportPropertiesAvailable(transportProperties);
                     handleStatus(response);
                     if (getter != null) {
                         getter.handle(response);
@@ -603,7 +682,9 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
                 if (lastModifiedHeader != null) {
                     Date lastModified = DateUtils.parseDate(lastModifiedHeader.getValue());
                     if (lastModified != null) {
-                        pathProcessor.setLastModified(task.getDataPath(), lastModified.getTime());
+                        pathProcessor.setLastModified(
+                                task.getDataPath(),
+                                HttpTransporterUtils.clampRemoteLastModified(lastModified.getTime()));
                     }
                 }
             }
@@ -615,6 +696,36 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
             if (checksums != null && !checksums.isEmpty()) {
                 checksums.forEach(task::setChecksum);
             }
+        }
+    }
+
+    private static Map<TransferEvent.TransportPropertyKey, Object> createTransportProperties(
+            CloseableHttpResponse response, HttpCoreContext context) {
+        HttpTransportPropertiesBuilder builder =
+                new HttpTransportPropertiesBuilder(toHttpVersion(response.getProtocolVersion()));
+        SSLSession sslSession = context.getAttribute(CONTEXT_ATTRIBUTE_NAME_SSL_SESSION, SSLSession.class);
+        if (sslSession != null) {
+            builder.withSslProtocol(sslSession.getProtocol());
+            builder.withSslCipherSuite(sslSession.getCipherSuite());
+        }
+        // content encoding is not available (see https://issues.apache.org/jira/browse/HTTPCORE-792)
+        return builder.build();
+    }
+
+    static HttpVersion toHttpVersion(ProtocolVersion version) {
+        switch (version.getMajor()) {
+            case 1:
+                if (version.getMinor() == 0) {
+                    return HttpVersion.HTTP_1_0;
+                } else {
+                    return HttpVersion.HTTP_1_1;
+                }
+            case 2:
+                return HttpVersion.HTTP_2;
+            case 3:
+                return HttpVersion.HTTP_3;
+            default:
+                throw new IllegalArgumentException("Unknown version " + version.toString());
         }
     }
 
@@ -754,6 +865,37 @@ final class ApacheTransporter extends AbstractTransporter implements HttpTranspo
             }
             RETRY_INTERVAL_HOLDER.remove();
             return ri;
+        }
+    }
+
+    static class ConcurrentAuthCache implements AuthCache {
+        private final ConcurrentHashMap<HttpHost, AuthScheme> map = new ConcurrentHashMap<>();
+
+        @Override
+        public void put(HttpHost host, AuthScheme authScheme) {
+            if (host != null && authScheme != null) {
+                map.put(host, authScheme);
+            }
+        }
+
+        @Override
+        public AuthScheme get(HttpHost host) {
+            if (host == null) {
+                return null;
+            }
+            return map.get(host);
+        }
+
+        @Override
+        public void remove(HttpHost host) {
+            if (host != null) {
+                map.remove(host);
+            }
+        }
+
+        @Override
+        public void clear() {
+            map.clear();
         }
     }
 }

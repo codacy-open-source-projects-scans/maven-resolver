@@ -27,6 +27,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 
 import org.bouncycastle.bcpg.ArmoredOutputStream;
@@ -48,13 +50,14 @@ import org.slf4j.LoggerFactory;
 final class GnupgSignatureArtifactGenerator implements ArtifactGenerator {
     private static final String ARTIFACT_EXTENSION = ".asc";
     private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final ArrayList<Artifact> artifacts;
+    private final List<Artifact> artifacts;
     private final Predicate<Artifact> signableArtifactPredicate;
     private final PGPSecretKey secretKey;
     private final PGPPrivateKey privateKey;
     private final PGPSignatureSubpacketVector hashSubPackets;
     private final String keyInfo;
-    private final ArrayList<Path> signatureTempFiles;
+    private final List<Path> signatureTempFiles;
+    private final AtomicBoolean closed;
 
     GnupgSignatureArtifactGenerator(
             Collection<Artifact> artifacts,
@@ -70,6 +73,7 @@ final class GnupgSignatureArtifactGenerator implements ArtifactGenerator {
         this.hashSubPackets = hashSubPackets;
         this.keyInfo = keyInfo;
         this.signatureTempFiles = new ArrayList<>();
+        this.closed = new AtomicBoolean(false);
         logger.debug("Created generator using key {}", keyInfo);
     }
 
@@ -79,32 +83,52 @@ final class GnupgSignatureArtifactGenerator implements ArtifactGenerator {
     }
 
     @Override
-    public Collection<? extends Artifact> generate(Collection<? extends Artifact> generatedArtifacts) {
+    public synchronized Collection<? extends Artifact> generate(Collection<? extends Artifact> generatedArtifacts) {
         try {
             artifacts.addAll(generatedArtifacts);
 
-            // back out if PGP signatures found among artifacts
-            if (artifacts.stream().anyMatch(a -> a.getExtension().endsWith(ARTIFACT_EXTENSION))) {
-                logger.debug("GPG signatures are present among artifacts, bailing out");
+            // Determine, per artifact, which signable artifacts still need a signature. A pre-existing signature
+            // (e.g. produced by maven-gpg-plugin) skips only the artifact it covers; it must not disable signing
+            // of the whole artifact set, which would silently publish partially unsigned releases.
+            ArrayList<Artifact> artifactsToSign = new ArrayList<>();
+            for (Artifact artifact : artifacts) {
+                if (isSignatureArtifact(artifact)) {
+                    continue; // never sign a signature
+                }
+                if (!signableArtifactPredicate.test(artifact)) {
+                    continue;
+                }
+                if (hasSignature(artifact)) {
+                    logger.debug("GPG signature already present for {}, not signing it again", artifact);
+                    continue;
+                }
+                artifactsToSign.add(artifact);
+            }
+            if (artifactsToSign.isEmpty()) {
+                logger.debug("GPG signatures are present for all signable artifacts, nothing to sign");
                 return Collections.emptyList();
+            }
+            if (artifacts.stream().anyMatch(this::isSignatureArtifact)) {
+                logger.info(
+                        "GPG signatures are present for some artifacts only; signing the remaining {} artifact(s) with key {}",
+                        artifactsToSign.size(),
+                        keyInfo);
             }
 
             // sign relevant artifacts
             ArrayList<Artifact> result = new ArrayList<>();
-            for (Artifact artifact : artifacts) {
-                if (signableArtifactPredicate.test(artifact)) {
-                    Path signatureTempFile = Files.createTempFile("signer-pgp", "tmp");
-                    signatureTempFiles.add(signatureTempFile);
-                    try (InputStream artifactContent = Files.newInputStream(artifact.getPath());
-                            OutputStream signatureContent = Files.newOutputStream(signatureTempFile)) {
-                        sign(artifactContent, signatureContent);
-                    }
-                    result.add(new SubArtifact(
-                            artifact,
-                            artifact.getClassifier(),
-                            artifact.getExtension() + ARTIFACT_EXTENSION,
-                            signatureTempFile.toFile()));
+            for (Artifact artifact : artifactsToSign) {
+                Path signatureTempFile = Files.createTempFile("signer-pgp", "tmp");
+                signatureTempFiles.add(signatureTempFile);
+                try (InputStream artifactContent = Files.newInputStream(artifact.getPath());
+                        OutputStream signatureContent = Files.newOutputStream(signatureTempFile)) {
+                    sign(artifactContent, signatureContent);
                 }
+                result.add(new SubArtifact(
+                        artifact,
+                        artifact.getClassifier(),
+                        artifact.getExtension() + ARTIFACT_EXTENSION,
+                        signatureTempFile.toFile()));
             }
             logger.debug("Signed {} artifacts with key {}", result.size(), keyInfo);
             return result;
@@ -113,15 +137,31 @@ final class GnupgSignatureArtifactGenerator implements ArtifactGenerator {
         }
     }
 
+    private boolean isSignatureArtifact(Artifact artifact) {
+        return artifact.getExtension().endsWith(ARTIFACT_EXTENSION);
+    }
+
+    private boolean hasSignature(Artifact artifact) {
+        String signatureExtension = artifact.getExtension() + ARTIFACT_EXTENSION;
+        return artifacts.stream()
+                .anyMatch(a -> a.getExtension().equals(signatureExtension)
+                        && a.getClassifier().equals(artifact.getClassifier())
+                        && a.getArtifactId().equals(artifact.getArtifactId())
+                        && a.getGroupId().equals(artifact.getGroupId())
+                        && a.getVersion().equals(artifact.getVersion()));
+    }
+
     @Override
     public void close() {
-        signatureTempFiles.forEach(p -> {
-            try {
-                Files.deleteIfExists(p);
-            } catch (IOException e) {
-                p.toFile().deleteOnExit();
-            }
-        });
+        if (closed.compareAndSet(false, true)) {
+            signatureTempFiles.forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException e) {
+                    p.toFile().deleteOnExit();
+                }
+            });
+        }
     }
 
     private void sign(InputStream content, OutputStream signature) throws IOException {

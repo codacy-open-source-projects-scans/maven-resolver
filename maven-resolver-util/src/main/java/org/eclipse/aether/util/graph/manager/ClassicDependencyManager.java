@@ -18,7 +18,6 @@
  */
 package org.eclipse.aether.util.graph.manager;
 
-import java.util.ArrayList;
 import java.util.Collection;
 
 import org.eclipse.aether.collection.DependencyCollectionContext;
@@ -64,12 +63,7 @@ import org.eclipse.aether.scope.SystemDependencyScope;
 public final class ClassicDependencyManager extends AbstractDependencyManager {
     /**
      * Creates a new dependency manager without any management information.
-     *
-     * @deprecated Use {@link #ClassicDependencyManager(ScopeManager)} instead to provide
-     *             application-specific scope management. This constructor uses legacy system
-     *             dependency scope handling which may not be appropriate for all use cases.
      */
-    @Deprecated
     public ClassicDependencyManager() {
         this(null);
     }
@@ -94,7 +88,7 @@ public final class ClassicDependencyManager extends AbstractDependencyManager {
 
     @SuppressWarnings("checkstyle:ParameterNumber")
     private ClassicDependencyManager(
-            ArrayList<AbstractDependencyManager> path,
+            AbstractDependencyManager parent,
             int depth,
             int deriveUntil,
             int applyFrom,
@@ -105,7 +99,7 @@ public final class ClassicDependencyManager extends AbstractDependencyManager {
             MMap<Key, Holder<Collection<Exclusion>>> managedExclusions,
             SystemDependencyScope systemDependencyScope) {
         super(
-                path,
+                parent,
                 depth,
                 deriveUntil,
                 applyFrom,
@@ -153,10 +147,8 @@ public final class ClassicDependencyManager extends AbstractDependencyManager {
             MMap<Key, Boolean> managedOptionals,
             MMap<Key, String> managedLocalPaths,
             MMap<Key, Holder<Collection<Exclusion>>> managedExclusions) {
-        ArrayList<AbstractDependencyManager> path = new ArrayList<>(this.path);
-        path.add(this);
         return new ClassicDependencyManager(
-                path,
+                this,
                 depth + 1,
                 deriveUntil,
                 applyFrom,

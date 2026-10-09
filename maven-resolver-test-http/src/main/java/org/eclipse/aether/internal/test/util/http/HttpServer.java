@@ -20,6 +20,9 @@ package org.eclipse.aether.internal.test.util.http;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.DatagramSocket;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +30,7 @@ import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -51,12 +55,19 @@ import org.eclipse.jetty.http.HttpFields;
 import org.eclipse.jetty.http.HttpHeader;
 import org.eclipse.jetty.http.HttpMethod;
 import org.eclipse.jetty.http.HttpURI;
+import org.eclipse.jetty.http.HttpVersion;
 import org.eclipse.jetty.http.pathmap.MatchedResource;
 import org.eclipse.jetty.http.pathmap.PathMappings;
 import org.eclipse.jetty.http.pathmap.PathSpec;
 import org.eclipse.jetty.http2.server.HTTP2ServerConnectionFactory;
+import org.eclipse.jetty.http3.server.HTTP3ServerConnectionFactory;
+import org.eclipse.jetty.http3.server.HTTP3ServerQuicConfiguration;
 import org.eclipse.jetty.io.ByteBufferPool;
 import org.eclipse.jetty.io.Content;
+import org.eclipse.jetty.io.DatagramChannelEndPoint;
+import org.eclipse.jetty.io.EndPoint;
+import org.eclipse.jetty.quic.quiche.server.QuicheServerConnector;
+import org.eclipse.jetty.quic.quiche.server.QuicheServerQuicConfiguration;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.HttpConfiguration;
 import org.eclipse.jetty.server.HttpConnectionFactory;
@@ -75,6 +86,7 @@ import org.slf4j.LoggerFactory;
 public class HttpServer {
 
     public static class LogEntry {
+        private final HttpVersion version;
 
         private final String method;
 
@@ -86,10 +98,15 @@ public class HttpServer {
 
         CountDownLatch responseHeadersAvailableSignal = new CountDownLatch(1);
 
-        public LogEntry(String method, String path, Map<String, String> requestHeaders) {
+        public LogEntry(HttpVersion version, String method, String path, Map<String, String> requestHeaders) {
+            this.version = version;
             this.method = method;
             this.path = path;
             this.requestHeaders = requestHeaders;
+        }
+
+        public HttpVersion getVersion() {
+            return version;
         }
 
         public String getMethod() {
@@ -127,7 +144,7 @@ public class HttpServer {
 
         @Override
         public String toString() {
-            return method + " " + path;
+            return version + " " + method + " " + path;
         }
     }
 
@@ -139,7 +156,9 @@ public class HttpServer {
 
     public enum ChecksumHeader {
         NEXUS,
-        XCHECKSUM
+        XCHECKSUM,
+        XCHECKSUM_GOOGLE,
+        XCHECKSUM_AMAZON
     }
 
     private static final Logger LOGGER = LoggerFactory.getLogger(HttpServer.class);
@@ -160,6 +179,8 @@ public class HttpServer {
 
     private ServerConnector httpsConnector;
 
+    private QuicheServerConnector http3Connector;
+
     private String username;
 
     private String password;
@@ -176,6 +197,10 @@ public class HttpServer {
 
     private final List<LogEntry> logEntries = Collections.synchronizedList(new ArrayList<>());
 
+    private String responseBodyForPut;
+
+    private Map<String, String> serverErrorHeaders = Collections.emptyMap();
+
     public String getHost() {
         return "localhost";
     }
@@ -188,6 +213,10 @@ public class HttpServer {
         return httpsConnector != null ? httpsConnector.getLocalPort() : -1;
     }
 
+    public int getHttp3Port() {
+        return http3Connector != null ? http3Connector.getLocalPort() : -1;
+    }
+
     public String getHttpUrl() {
         return "http://" + getHost() + ":" + getHttpPort();
     }
@@ -196,37 +225,33 @@ public class HttpServer {
         return "https://" + getHost() + ":" + getHttpsPort();
     }
 
-    public HttpServer addSslConnector() {
-        return addSslConnector(true, true);
+    public String getHttp3Url() {
+        return "https://" + getHost() + ":" + getHttp3Port();
     }
 
-    public HttpServer addSelfSignedSslConnector() {
-        return addSslConnector(false, true);
+    public HttpServer addHttp2ConnectorWithMutualTLS() {
+        return addHttp2Connector(true, true, -1);
     }
 
-    public HttpServer addSelfSignedSslConnectorHttp2Only() {
-        return addSslConnector(false, false);
+    public HttpServer addHttp2Connector() {
+        return addHttp2Connector(false, true, -1);
     }
 
-    private HttpServer addSslConnector(boolean needClientAuth, boolean needHttp11) {
+    public HttpServer addHttp2OnlyConnector() {
+        return addHttp2Connector(false, false, -1);
+    }
+
+    public HttpServer addHttp2OnlyConnectorWithMutualTLS() {
+        return addHttp2Connector(true, false, -1);
+    }
+
+    public HttpServer addHttp2OnlyConnectorWithMutualTLS(int port) {
+        return addHttp2Connector(true, false, port);
+    }
+
+    private HttpServer addHttp2Connector(boolean needClientAuth, boolean needHttp11, int port) {
         if (httpsConnector == null) {
-            SslContextFactory.Server ssl = new SslContextFactory.Server();
-            ssl.setNeedClientAuth(needClientAuth);
-            if (!needClientAuth) {
-                ssl.setKeyStorePath(HttpTransporterTest.KEY_STORE_SELF_SIGNED_PATH
-                        .toAbsolutePath()
-                        .toString());
-                ssl.setKeyStorePassword("server-pwd");
-                ssl.setSniRequired(false);
-            } else {
-                ssl.setKeyStorePath(
-                        HttpTransporterTest.KEY_STORE_PATH.toAbsolutePath().toString());
-                ssl.setKeyStorePassword("server-pwd");
-                ssl.setTrustStorePath(
-                        HttpTransporterTest.TRUST_STORE_PATH.toAbsolutePath().toString());
-                ssl.setTrustStorePassword("client-pwd");
-                ssl.setSniRequired(false);
-            }
+            SslContextFactory.Server ssl = createServerSslContextFactory(needClientAuth);
 
             HttpConfiguration httpsConfig = new HttpConfiguration();
             SecureRequestCustomizer customizer = new SecureRequestCustomizer();
@@ -249,6 +274,11 @@ public class HttpServer {
             } else {
                 httpsConnector = new ServerConnector(server, tls, alpn, http2);
             }
+
+            if (port != -1) {
+                httpsConnector.setPort(port);
+            }
+
             server.addConnector(httpsConnector);
             try {
                 httpsConnector.start();
@@ -257,6 +287,79 @@ public class HttpServer {
             }
         }
         return this;
+    }
+
+    private SslContextFactory.Server createServerSslContextFactory(boolean needClientAuth) {
+        SslContextFactory.Server ssl = new SslContextFactory.Server();
+        ssl.setSniRequired(false);
+        ssl.setKeyStorePath(
+                HttpTransporterTest.SERVER_STORE_PATH.toAbsolutePath().toString());
+        ssl.setKeyStorePassword("server-pwd");
+        ssl.setNeedClientAuth(needClientAuth);
+        if (needClientAuth) {
+            ssl.setTrustStorePath(
+                    HttpTransporterTest.CLIENT_STORE_PATH.toAbsolutePath().toString());
+            ssl.setTrustStorePassword("client-pwd");
+        }
+        return ssl;
+    }
+
+    public HttpServer addHttp3Connector(boolean needClientAuth) {
+        return addHttp3Connector(needClientAuth, -1);
+    }
+
+    public HttpServer addHttp3Connector(boolean needClientAuth, int port) {
+        if (http3Connector == null) {
+            QuicheServerQuicConfiguration serverQuicConfig = HTTP3ServerQuicConfiguration.configure(
+                    new QuicheServerQuicConfiguration(HttpTransporterTest.PEM_QUICHE_SERVER_PATH));
+            http3Connector = new QuicheServerConnector(
+                    server,
+                    createServerSslContextFactory(needClientAuth),
+                    serverQuicConfig,
+                    new HTTP3ServerConnectionFactory());
+            if (port != -1) {
+                http3Connector.setPort(port);
+            }
+            server.addConnector(http3Connector);
+            try {
+                http3Connector.start();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }
+        return this;
+    }
+
+    /**
+     * Finds a port that is free for both TCP and UDP, so that the HTTP/2 (TCP) and HTTP/3 (UDP) connectors can be
+     * bound to the same port number. TCP and UDP port spaces are independent, so an OS-assigned TCP port may have its
+     * same-numbered UDP port already taken by another process, which makes binding HTTP/3 to the HTTPS port flaky.
+     *
+     * @return a port number that is (at probe time) free for both TCP and UDP
+     */
+    int findFreeTcpAndUdpPort() {
+        // 100 retries: 20 was insufficient on busy CI hosts (MRESOLVER-2142)
+        for (int i = 0; i < 100; i++) {
+            int port;
+            try (ServerSocket serverSocket = new ServerSocket(0)) {
+                port = serverSocket.getLocalPort();
+            } catch (IOException e) {
+                throw new IllegalStateException("Failed to find a free TCP port", e);
+            }
+            if (isUdpPortFree(port)) {
+                return port;
+            }
+        }
+        throw new IllegalStateException("Failed to find a port free for both TCP and UDP");
+    }
+
+    private static boolean isUdpPortFree(int port) {
+        try (DatagramSocket socket = new DatagramSocket(null)) {
+            socket.bind(new InetSocketAddress(port));
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     public List<LogEntry> getLogEntries() {
@@ -270,6 +373,11 @@ public class HttpServer {
 
     public HttpServer setRangeSupport(boolean rangeSupport) {
         this.rangeSupport = rangeSupport;
+        return this;
+    }
+
+    public HttpServer setResponseBodyForPut(String body) {
+        this.responseBodyForPut = body;
         return this;
     }
 
@@ -310,8 +418,14 @@ public class HttpServer {
     }
 
     public HttpServer setServerErrorsBeforeWorks(int serverErrorsBeforeWorks, int errorStatusCode) {
+        return setServerErrorsBeforeWorks(serverErrorsBeforeWorks, errorStatusCode, Collections.emptyMap());
+    }
+
+    public HttpServer setServerErrorsBeforeWorks(
+            int serverErrorsBeforeWorks, int errorStatusCode, Map<String, String> headers) {
         this.serverErrorsBeforeWorks.set(serverErrorsBeforeWorks);
         this.serverErrorStatusCode = errorStatusCode;
+        this.serverErrorHeaders = headers;
         return this;
     }
 
@@ -322,6 +436,7 @@ public class HttpServer {
 
         server = new Server();
         httpConnector = new ServerConnector(server);
+        // always add the HTTP 1.1 connector
         server.addConnector(httpConnector);
 
         server.setHandler(new LogHandler(new CompressionEnforcingHandler(new Handler.Sequence(
@@ -344,6 +459,27 @@ public class HttpServer {
             httpConnector = null;
             httpsConnector = null;
         }
+    }
+
+    public int getNumConnectedEndPoints() {
+        if (server.isStopped()) {
+            throw new IllegalStateException("Server is stopped");
+        }
+        Collection<EndPoint> connectedEndPoints = new ArrayList<>();
+        if (httpConnector != null) {
+            connectedEndPoints.addAll(httpConnector.getConnectedEndPoints());
+        }
+        if (httpsConnector != null) {
+            connectedEndPoints.addAll(httpsConnector.getConnectedEndPoints());
+        }
+        if (http3Connector != null) {
+            // filter out the always present DatagramChannelEndPoint, which is not a real live connection
+            // (https://github.com/jetty/jetty.project/issues/15436)
+            http3Connector.getConnectedEndPoints().stream()
+                    .filter(endPoint -> !(endPoint instanceof DatagramChannelEndPoint))
+                    .forEach(connectedEndPoints::add);
+        }
+        return connectedEndPoints.size();
     }
 
     private class CompressionEnforcingHandler extends CompressionHandler {
@@ -467,6 +603,9 @@ public class HttpServer {
         public boolean handle(Request request, Response response, Callback callback) throws IOException {
             if (serverErrorsBeforeWorks.getAndDecrement() > 0) {
                 response.setStatus(serverErrorStatusCode);
+                for (Map.Entry<String, String> header : serverErrorHeaders.entrySet()) {
+                    response.getHeaders().add(header.getKey(), header.getValue());
+                }
                 writeResponseBodyMessage(request, response, "Oops, come back later!");
                 return true;
             }
@@ -484,14 +623,19 @@ public class HttpServer {
         public boolean handle(Request req, Response response, Callback callback) throws Exception {
 
             LOGGER.info(
-                    "{} {}{}",
+                    "{} {} {}{}",
+                    req.getConnectionMetaData().getHttpVersion(),
                     req.getMethod(),
                     req.getHttpURI().getDecodedPath(),
                     req.getHttpURI().getQuery() != null ? "?" + req.getHttpURI().getQuery() : "");
 
             Map<String, String> requestHeaders =
                     toUnmodifiableMap(req.getHeaders()); // capture request headers before other handlers modify them
-            LogEntry logEntry = new LogEntry(req.getMethod(), req.getHttpURI().getPathQuery(), requestHeaders);
+            LogEntry logEntry = new LogEntry(
+                    req.getConnectionMetaData().getHttpVersion(),
+                    req.getMethod(),
+                    req.getHttpURI().getPathQuery(),
+                    requestHeaders);
             logEntries.add(logEntry);
             // prevent closing the response before logging (assume all writes are synchronous for simplicity)
             boolean result = super.handle(req, response, callback);
@@ -537,12 +681,14 @@ public class HttpServer {
                     writeResponseBodyMessage(req, response, "Not found");
                     return true;
                 }
+
                 long ifUnmodifiedSince = req.getHeaders().getDateField(HttpHeader.IF_UNMODIFIED_SINCE);
                 if (ifUnmodifiedSince != -1L && file.lastModified() > ifUnmodifiedSince) {
                     response.setStatus(HttpServletResponse.SC_PRECONDITION_FAILED);
                     writeResponseBodyMessage(req, response, "Precondition failed");
                     return true;
                 }
+
                 long offset = 0L;
                 String range = req.getHeaders().get(HttpHeader.RANGE);
                 if (range != null && rangeSupport) {
@@ -561,6 +707,7 @@ public class HttpServer {
                         return true;
                     }
                 }
+
                 response.setStatus((offset > 0L) ? HttpServletResponse.SC_PARTIAL_CONTENT : HttpServletResponse.SC_OK);
                 response.getHeaders().add(HttpHeader.LAST_MODIFIED, DateGenerator.formatDate(file.lastModified()));
                 response.getHeaders().add(HttpHeader.CONTENT_LENGTH, Long.toString(file.length() - offset));
@@ -577,6 +724,12 @@ public class HttpServer {
                         response.getHeaders().add(HttpHeader.ETAG.asString(), "{SHA1{" + checksums.get("SHA-1") + "}}");
                     } else if (checksumHeader == ChecksumHeader.XCHECKSUM) {
                         response.getHeaders().add("x-checksum-sha1", checksums.get(Sha1ChecksumAlgorithmFactory.NAME));
+                    } else if (checksumHeader == ChecksumHeader.XCHECKSUM_GOOGLE) {
+                        response.getHeaders()
+                                .add("x-goog-meta-checksum-sha1", checksums.get(Sha1ChecksumAlgorithmFactory.NAME));
+                    } else if (checksumHeader == ChecksumHeader.XCHECKSUM_AMAZON) {
+                        response.getHeaders()
+                                .add("x-amz-meta-checksum-sha1", checksums.get(Sha1ChecksumAlgorithmFactory.NAME));
                     }
                 }
                 if (HttpMethod.HEAD.is(req.getMethod())) {
@@ -602,10 +755,18 @@ public class HttpServer {
                         Content.copy(req, Content.Sink.from(channel), fileWriteCallback);
                         fileWriteCallback.block();
                     } catch (IOException e) {
+                        LOGGER.warn("Failed to write file {}", file.getAbsolutePath(), e);
                         file.delete();
                         throw e;
                     }
-                    response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+                    // optionally add some response body to test that the client can handle it, even though Maven
+                    // Repository Protocol doesn't mention it
+                    if (responseBodyForPut != null) {
+                        writeResponseBodyMessage(req, response, responseBodyForPut);
+                        response.setStatus(HttpServletResponse.SC_CREATED);
+                    } else {
+                        response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+                    }
                 } else {
                     response.setStatus(HttpServletResponse.SC_FORBIDDEN);
                 }

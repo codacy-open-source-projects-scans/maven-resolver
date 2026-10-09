@@ -18,10 +18,8 @@
  */
 package org.eclipse.aether.supplier;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
@@ -91,7 +89,7 @@ import org.eclipse.aether.internal.impl.LocalPathPrefixComposerFactory;
 import org.eclipse.aether.internal.impl.Maven2RepositoryLayoutFactory;
 import org.eclipse.aether.internal.impl.SimpleLocalRepositoryManagerFactory;
 import org.eclipse.aether.internal.impl.TrackingFileManager;
-import org.eclipse.aether.internal.impl.TrackingFileManagerProvider;
+import org.eclipse.aether.internal.impl.TrackingFileManagerSupplier;
 import org.eclipse.aether.internal.impl.checksum.DefaultChecksumAlgorithmFactorySelector;
 import org.eclipse.aether.internal.impl.checksum.Md5ChecksumAlgorithmFactory;
 import org.eclipse.aether.internal.impl.checksum.Sha1ChecksumAlgorithmFactory;
@@ -229,7 +227,7 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
     }
 
     protected TrackingFileManager createTrackingFileManager() {
-        return new TrackingFileManagerProvider(getNamedLockFactorySelector()).get();
+        return new TrackingFileManagerSupplier(getNamedLockFactorySelector()).get();
     }
 
     private LocalPathComposer localPathComposer;
@@ -541,8 +539,7 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
         RepositoryKeyFunctionFactory repositoryKeyFunctionFactory = getRepositoryKeyFunctionFactory();
         HashMap<String, LocalRepositoryManagerFactory> localRepositoryProviders = new HashMap<>(2);
         localRepositoryProviders.put(
-                SimpleLocalRepositoryManagerFactory.NAME,
-                new SimpleLocalRepositoryManagerFactory(localPathComposer, repositoryKeyFunctionFactory));
+                SimpleLocalRepositoryManagerFactory.NAME, new SimpleLocalRepositoryManagerFactory(localPathComposer));
         localRepositoryProviders.put(
                 EnhancedLocalRepositoryManagerFactory.NAME,
                 new EnhancedLocalRepositoryManagerFactory(
@@ -590,7 +587,8 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
                         getRepositoryKeyFunctionFactory(),
                         this::getMetadataResolver,
                         this::getRemoteRepositoryManager,
-                        getRepositoryLayoutProvider()));
+                        getRepositoryLayoutProvider(),
+                        getTransporterProvider()));
         return result;
     }
 
@@ -1155,9 +1153,9 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
         return new DefaultModelCacheFactory();
     }
 
-    private List<ValidatorFactory> validatorFactories;
+    private Map<String, ValidatorFactory> validatorFactories;
 
-    public final List<ValidatorFactory> getValidatorFactories() {
+    public final Map<String, ValidatorFactory> getValidatorFactories() {
         checkClosed();
         if (validatorFactories == null) {
             validatorFactories = createValidatorFactories();
@@ -1165,8 +1163,8 @@ public class RepositorySystemSupplier implements Supplier<RepositorySystem> {
         return validatorFactories;
     }
 
-    protected List<ValidatorFactory> createValidatorFactories() {
-        return new ArrayList<>();
+    protected Map<String, ValidatorFactory> createValidatorFactories() {
+        return new HashMap<>();
     }
 
     private RepositorySystemValidator repositorySystemValidator;

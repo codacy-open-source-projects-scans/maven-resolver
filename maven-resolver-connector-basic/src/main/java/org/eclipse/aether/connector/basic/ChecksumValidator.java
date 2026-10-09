@@ -120,6 +120,8 @@ final class ChecksumValidator {
 
     private boolean validateChecksums(Map<String, ?> actualChecksums, ChecksumKind kind, Map<String, ?> checksums)
             throws ChecksumFailureException {
+        boolean accepted = false;
+        boolean rejected = false;
         for (Map.Entry<String, ?> entry : checksums.entrySet()) {
             String algo = entry.getKey();
             Object calculated = actualChecksums.get(algo);
@@ -139,25 +141,33 @@ final class ChecksumValidator {
             checksumExpectedValues.put(getChecksumPath(checksumAlgorithmFactory), expected);
 
             if (!isEqualChecksum(expected, actual)) {
+                // ALL comparable checksums of this kind must match: a mismatch on any algorithm rejects the
+                // whole kind, so a match on a weaker algorithm (map iteration order is not strength-ordered)
+                // cannot mask a recorded mismatch on a stronger one. The policy decides whether the mismatch
+                // fails the transfer immediately (default) or is merely recorded.
+                rejected = true;
                 checksumPolicy.onChecksumMismatch(
                         checksumAlgorithmFactory.getName(),
                         kind,
-                        new ChecksumFailureException(expected, kind.name(), actual));
+                        ChecksumFailureException.mismatch(expected, kind.name(), actual));
             } else if (checksumPolicy.onChecksumMatch(checksumAlgorithmFactory.getName(), kind)) {
-                return true;
+                accepted = true;
             }
         }
-        return false;
+        return accepted && !rejected;
     }
 
     private boolean validateExternalChecksums(Map<String, ?> actualChecksums) throws ChecksumFailureException {
+        boolean rejected = false;
         for (ChecksumLocation checksumLocation : checksumLocations) {
             ChecksumAlgorithmFactory factory = checksumLocation.getChecksumAlgorithmFactory();
             Object calculated = actualChecksums.get(factory.getName());
             if (calculated instanceof Exception) {
                 checksumPolicy.onChecksumError(
-                        factory.getName(), ChecksumKind.REMOTE_EXTERNAL, new ChecksumFailureException((Exception)
-                                calculated));
+                        factory.getName(),
+                        ChecksumKind.REMOTE_EXTERNAL,
+                        ChecksumFailureException.processingFailure(
+                                "Checksum calculation problem", (Exception) calculated));
                 continue;
             }
             Path checksumFile = getChecksumPath(checksumLocation.getChecksumAlgorithmFactory());
@@ -169,7 +179,9 @@ final class ChecksumValidator {
                     }
                 } catch (Exception e) {
                     checksumPolicy.onChecksumError(
-                            factory.getName(), ChecksumKind.REMOTE_EXTERNAL, new ChecksumFailureException(e));
+                            factory.getName(),
+                            ChecksumKind.REMOTE_EXTERNAL,
+                            ChecksumFailureException.processingFailure("Checksum fetching problem", e));
                     continue;
                 }
 
@@ -178,16 +190,22 @@ final class ChecksumValidator {
                 checksumExpectedValues.put(checksumFile, expected);
 
                 if (!isEqualChecksum(expected, actual)) {
+                    rejected = true;
                     checksumPolicy.onChecksumMismatch(
                             factory.getName(),
                             ChecksumKind.REMOTE_EXTERNAL,
-                            new ChecksumFailureException(expected, ChecksumKind.REMOTE_EXTERNAL.name(), actual));
-                } else if (checksumPolicy.onChecksumMatch(factory.getName(), ChecksumKind.REMOTE_EXTERNAL)) {
+                            ChecksumFailureException.mismatch(expected, ChecksumKind.REMOTE_EXTERNAL.name(), actual));
+                } else if (checksumPolicy.onChecksumMatch(factory.getName(), ChecksumKind.REMOTE_EXTERNAL)
+                        && !rejected) {
+                    // a fetched checksum that mismatched earlier already rejected this download: a later
+                    // (possibly weaker) matching algorithm must not accept it
                     return true;
                 }
             } catch (IOException e) {
                 checksumPolicy.onChecksumError(
-                        factory.getName(), ChecksumKind.REMOTE_EXTERNAL, new ChecksumFailureException(e));
+                        factory.getName(),
+                        ChecksumKind.REMOTE_EXTERNAL,
+                        ChecksumFailureException.processingFailure("Checksum related IO problem", e));
             }
         }
         return false;

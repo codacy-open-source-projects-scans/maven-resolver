@@ -8,7 +8,7 @@
   "License"); you may not use this file except in compliance
   with the License.  You may obtain a copy of the License at
 
-  http://www.apache.org/licenses/LICENSE-2.0
+  https://www.apache.org/licenses/LICENSE-2.0
 
   Unless required by applicable law or agreed to in writing,
   software distributed under the License is distributed on an
@@ -23,7 +23,7 @@
   <parent>
     <groupId>org.apache.maven.resolver</groupId>
     <artifactId>maven-resolver</artifactId>
-    <version>2.0.18-SNAPSHOT</version>
+    <version>2.0.25-SNAPSHOT</version>
   </parent>
 
   <artifactId>maven-resolver-tools</artifactId>
@@ -33,7 +33,6 @@
 
   <properties>
     <javaVersion>17</javaVersion>
-    <roasterVersion>2.31.0.Final</roasterVersion>
   </properties>
 
   <dependencies>
@@ -61,6 +60,12 @@
     <dependency>
       <groupId>org.apache.maven.resolver</groupId>
       <artifactId>maven-resolver-named-locks</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.maven.resolver</groupId>
+      <artifactId>maven-resolver-named-locks-ipc</artifactId>
+      <version>${project.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
@@ -105,6 +110,18 @@
     </dependency>
     <dependency>
       <groupId>org.apache.maven.resolver</groupId>
+      <artifactId>maven-resolver-transport-minio</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.maven.resolver</groupId>
+      <artifactId>maven-resolver-transport-url</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.maven.resolver</groupId>
       <artifactId>maven-resolver-transport-wagon</artifactId>
       <scope>provided</scope>
     </dependency>
@@ -119,25 +136,17 @@
       <scope>provided</scope>
     </dependency>
 
+    <!-- Needed so the javadoc doclet can resolve javax.inject.* referenced by the scanned resolver sources. -->
     <dependency>
-      <groupId>org.jboss.forge.roaster</groupId>
-      <artifactId>roaster-api</artifactId>
-      <version>${roasterVersion}</version>
+      <groupId>javax.inject</groupId>
+      <artifactId>javax.inject</artifactId>
+      <scope>provided</scope>
     </dependency>
-    <dependency>
-      <groupId>org.jboss.forge.roaster</groupId>
-      <artifactId>roaster-jdt</artifactId>
-      <version>${roasterVersion}</version>
-    </dependency>
+
     <dependency>
       <groupId>org.codehaus.plexus</groupId>
       <artifactId>plexus-utils</artifactId>
       <version>${plexusUtils4Version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.ow2.asm</groupId>
-      <artifactId>asm</artifactId>
-      <version>9.9.1</version>
     </dependency>
     <dependency>
       <groupId>org.apache.velocity</groupId>
@@ -153,27 +162,100 @@
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-api</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.apache.maven.plugin-tools</groupId>
+      <artifactId>maven-plugin-tools-api</artifactId>
+      <version>3.16.0</version>
+      <exclusions>
+        <exclusion>
+          <groupId>org.apache.maven</groupId>
+          <artifactId>maven-artifact</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.maven</groupId>
+          <artifactId>maven-core</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.maven</groupId>
+          <artifactId>maven-model</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.maven</groupId>
+          <artifactId>maven-plugin-api</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.maven.reporting</groupId>
+          <artifactId>maven-reporting-api</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.maven.resolver</groupId>
+          <artifactId>maven-resolver-api</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.codehaus.plexus</groupId>
+          <artifactId>plexus-xml</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- JavadocLinkGenerator's constructor signature references Settings; declare it directly because maven-core is
+         excluded above. -->
+    <dependency>
+      <groupId>org.apache.maven</groupId>
+      <artifactId>maven-settings</artifactId>
+      <version>${maven3Version}</version>
+    </dependency>
 
     <!-- Not needed during compile -->
     <dependency>
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-lang3</artifactId>
-      <version>3.20.0</version>
+      <version>3.21.0</version>
       <scope>runtime</scope>
     </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-nop</artifactId>
-      <scope>runtime</scope>
+      <artifactId>slf4j-simple</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Test -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-api</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-engine</artifactId>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 
   <build>
     <plugins>
       <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>enforce-bytecode-version</id>
+            <configuration>
+              <rules>
+                <enforceBytecodeVersion>
+                  <excludes>
+                    <!-- this requires Java 22 but is optional only -->
+                    <exclude>org.eclipse.jetty.quic:jetty-quic-quiche-foreign</exclude>
+                  </excludes>
+                </enforceBytecodeVersion>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>exec-maven-plugin</artifactId>
-        <version>3.6.3</version>
+        <version>3.6.4</version>
         <executions>
           <execution>
             <id>render-configuration-page</id>
@@ -183,9 +265,17 @@
             <phase>package</phase>
             <configuration>
               <mainClass>org.eclipse.aether.tools.CollectConfiguration</mainClass>
+              <!-- 'test' scope classpath includes the provided-scope resolver artifacts, which the javadoc doclet
+                   needs to resolve the types referenced by the scanned configuration sources. -->
+              <classpathScope>test</classpathScope>
               <arguments>
                 <argument>--mode=resolver</argument>
                 <argument>--templates=configuration.md</argument>
+                <!-- Aggregate Javadocs are generated later by the site lifecycle, so CollectConfiguration validates
+                     internal links against the source roots instead. -->
+                <argument>--internal-javadoc-url=apidocs/</argument>
+                <argument>--internal-javadoc-version=${javadocVersion}</argument>
+                <argument>--external-javadoc-url=${javadocJavaApiUrl}</argument>
                 <argument>${basedir}/..</argument>
                 <argument>${basedir}/../target/generated-site/markdown/</argument>
               </arguments>
@@ -199,6 +289,7 @@
             <phase>package</phase>
             <configuration>
               <mainClass>org.eclipse.aether.tools.CollectConfiguration</mainClass>
+              <classpathScope>test</classpathScope>
               <arguments>
                 <argument>--mode=resolver</argument>
                 <argument>--templates=configuration.properties,configuration.yaml</argument>
@@ -212,7 +303,7 @@
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>build-helper-maven-plugin</artifactId>
-        <version>3.6.1</version>
+        <version>3.6.2</version>
         <executions>
           <execution>
             <id>attach-configuration-artifacts</id>

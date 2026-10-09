@@ -7,7 +7,7 @@
  (the "License"); you may not use this file except in compliance with
  the License.  You may obtain a copy of the License at
 
-      http://www.apache.org/licenses/LICENSE-2.0
+      https://www.apache.org/licenses/LICENSE-2.0
 
  Unless required by applicable law or agreed to in writing, software
  distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,7 +21,7 @@ from the beginning. Back when SL was implemented, the DI container in use with R
 Maven was the Plexus DI container, that had its own limitations: no constructor injection
 among others. Hence, the two was somewhat aligned with each other. Today, with Sisu DI, 
 this is not true anymore: we want to use constructor injection for components, but
-SL is always getting into our way forcing us to always add default constructor to components.
+SL is always getting in our way forcing us to always add default constructor to components.
 Hence, decision was made, and SL was deprecated while ago, and is about to be 
 dropped in Resolver 2.0.0 release.
 
@@ -38,10 +38,6 @@ when there is no desire to use [Eclipse Sisu](https://eclipse.dev/sisu/) DI. It 
 and supplies new, ready-to-use `RepositorySystem` instance for each call. Class is intentionally simplistic,
 no instance caching or anything alike is present: all that is concern of caller, just like proper shutdown 
 of the created resolver instances is.
-
-The `RepositorySystemSession` should be created using the 
-`org.apache.maven.repository.internal.MavenRepositorySystemUtils#newSession()` method
-and local repository added to it in usual way (there is no change in this area).
 
 The supplier class is written in a way, to allow easy customization if needed: just extend the class and override
 method as needed (all methods are protected).

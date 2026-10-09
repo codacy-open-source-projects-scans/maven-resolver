@@ -19,6 +19,8 @@
 package org.eclipse.aether.util.connector.transport.http;
 
 import java.net.InetAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.UnknownHostException;
 import java.nio.charset.Charset;
 import java.util.Collections;
@@ -144,6 +146,19 @@ public final class HttpTransporterUtils {
                 ConfigurationProperties.DEFAULT_HTTP_SUPPORT_WEBDAV,
                 ConfigurationProperties.HTTP_SUPPORT_WEBDAV + "." + repository.getId(),
                 ConfigurationProperties.HTTP_SUPPORT_WEBDAV);
+    }
+
+    /**
+     * Getter for {@link ConfigurationProperties#HTTP_SEND_RFC9457_ACCEPT}.
+     *
+     * @since 2.0.19
+     */
+    public static boolean isHttpSendRfc9457Accept(RepositorySystemSession session, RemoteRepository repository) {
+        return ConfigUtils.getBoolean(
+                session,
+                ConfigurationProperties.DEFAULT_HTTP_SEND_RFC9457_ACCEPT,
+                ConfigurationProperties.HTTP_SEND_RFC9457_ACCEPT + "." + repository.getId(),
+                ConfigurationProperties.HTTP_SEND_RFC9457_ACCEPT);
     }
 
     /**
@@ -298,5 +313,74 @@ public final class HttpTransporterUtils {
             }
         }
         return Optional.empty();
+    }
+
+    /**
+     * Getter for {@link ConfigurationProperties#HTTP_VERSION}.
+     */
+    public static ConfigurationProperties.HttpVersion getHttpVersion(
+            RepositorySystemSession session, RemoteRepository repository) {
+        return ConfigUtils.getEnum(
+                session,
+                ConfigurationProperties.HttpVersion.class,
+                ConfigurationProperties.DEFAULT_HTTP_VERSION,
+                ConfigurationProperties.HTTP_VERSION + "." + repository.getId(),
+                ConfigurationProperties.HTTP_VERSION);
+    }
+
+    /**
+     * Clamps a remote-supplied {@code Last-Modified} timestamp to the local clock: returns the given value as-is,
+     * or the current time when the value lies in the future.
+     * <p>
+     * HTTP transports stamp the downloaded file's modification time from the server-provided {@code Last-Modified}
+     * header, and the update check manager subsequently uses that file modification time as the {@code lastUpdated}
+     * instant for update-policy cutoffs. A repository serving a far-future {@code Last-Modified} date would otherwise
+     * permanently suppress interval-based update checks for that path. Update-interval decisions must rest on
+     * locally-observed time, so future-dated values are clamped to {@code System.currentTimeMillis()}.
+     *
+     * @param lastModifiedMillis the last modified timestamp in milliseconds since the epoch, as supplied by the
+     *                           remote server
+     * @return the supplied value, clamped to the local wall clock
+     * @since 2.0.23
+     */
+    public static long clampRemoteLastModified(long lastModifiedMillis) {
+        return Math.min(lastModifiedMillis, System.currentTimeMillis());
+    }
+
+    /**
+     * Shared code to create "base {@link URI}" for most common HTTP remote repositories and all HTTP transports.
+     * Note: this method just applies common validation and adjustments to URI, but it does not enforce protocol
+     * to be HTTP/HTTPS!
+     * <p>
+     * Validations and adjustments applied:
+     * <ul>
+     *     <li>URI string is parsed from {@link RemoteRepository#getUrl()} returned string</li>
+     *     <li>URI must have parsable {@link URI#parseServerAuthority()}</li>
+     *     <li>URI must not be opaque</li>
+     *     <li>URI must not have fragment or query</li>
+     *     <li>URI path is adjusted to end with {@code /} (slash).</li>
+     * </ul>
+     *
+     * @since 2.0.18
+     */
+    public static URI getBaseUri(RemoteRepository repository) throws URISyntaxException {
+        URI uri = new URI(repository.getUrl()).parseServerAuthority();
+        if (uri.isOpaque()) {
+            throw new URISyntaxException(repository.getUrl(), "URL must not be opaque");
+        }
+        if (uri.getRawFragment() != null || uri.getRawQuery() != null) {
+            throw new URISyntaxException(repository.getUrl(), "URL must not have fragment or query");
+        }
+        String path = uri.getRawPath();
+        if (path == null) {
+            path = "/";
+        }
+        if (!path.startsWith("/")) {
+            path = "/" + path;
+        }
+        if (!path.endsWith("/")) {
+            path = path + "/";
+        }
+        return new URI(uri.getScheme() + "://" + uri.getRawAuthority() + path);
     }
 }

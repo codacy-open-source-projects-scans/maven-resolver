@@ -247,6 +247,15 @@ public final class ConfigurationProperties {
      * specify headers for a specific remote repository by appending the suffix {@code .&lt;repoId&gt;} to this key when
      * storing the headers map. The repository-specific headers map is supposed to be complete, i.e. is not merged with
      * the general headers map.
+     * <p>
+     * <strong>Security note:</strong> configured headers are attached to every request the transport sends for the
+     * repository and, depending on the transport implementation, may be re-sent when the repository responds with
+     * a redirect - including redirects that leave the repository origin. Avoid placing credentials (for example
+     * {@code Authorization}, cookies or private token headers) in this map where repository authentication can be
+     * used instead: repository authentication is negotiated per host. All shipped HTTP transports scope configured
+     * headers to the repository origin by default, see the per-transport {@code originScopedHeaders} configuration
+     * keys ({@code aether.transport.apache.originScopedHeaders}, {@code aether.transport.jdk.originScopedHeaders},
+     * {@code aether.transport.jetty.originScopedHeaders}).
      *
      * @configurationSource {@link RepositorySystemSession#getConfigProperties()}
      * @configurationType {@link java.util.Map}
@@ -514,6 +523,40 @@ public final class ConfigurationProperties {
      */
     public static final String HTTPS_SECURITY_MODE_INSECURE = "insecure";
 
+    public enum HttpVersion {
+        /**
+         * The default HTTP version supported by the respective transporter (the most recent stable one, usually HTTP/2)
+         */
+        DEFAULT,
+        HTTP_1_1,
+        HTTP_2,
+        HTTP_3,
+        /**
+         * The maximum HTTP version supported by the respective transporter (may be unstable).
+         */
+        MAXIMUM;
+    }
+
+    /**
+     * The maximum and preferred HTTP version. Some transporters transparently fall back to lower versions if remote server does not
+     * support the requested version, while other may just simply fail the request.
+     * Value must be a {@link HttpVersion} enum value or its String representation.
+     *
+     * @configurationSource {@link RepositorySystemSession#getConfigProperties()}
+     * @configurationType {@link ConfigurationProperties.HttpVersion}
+     * @configurationDefaultValue {@link #DEFAULT_HTTP_VERSION}
+     * @configurationRepoIdSuffix Yes
+     * @since 2.0.21
+     */
+    public static final String HTTP_VERSION = PREFIX_TRANSPORT_HTTP + "version";
+
+    /**
+     * Default value if {@link #HTTP_VERSION} is not set.
+     *
+     * @since 2.0.21
+     */
+    public static final HttpVersion DEFAULT_HTTP_VERSION = HttpVersion.DEFAULT;
+
     /**
      * A flag indicating which visitor should be used to "flatten" the dependency graph into list. In Maven 4
      * the default is new "levelOrder", while Maven 3 used "preOrder". This property accepts values
@@ -578,6 +621,33 @@ public final class ConfigurationProperties {
     public static final String DEFAULT_REPOSITORY_SYSTEM_REPOSITORY_KEY_FUNCTION = "nid";
 
     /**
+     * Repository key function used for the provenance tracking entries that this local repository manager
+     * writes and reads. With an ID-only key, a repository declared in an untrusted (for example, transitively
+     * resolved) POM under the same ID as a trusted repository would be tracked as the same origin, potentially
+     * poisoning a shared local repository. The default is therefore the URL-qualified {@code "nid_hurl"}
+     * function.
+     * <p>
+     * This function is scoped to tracking entries, path composition, and split local repository prefixes.
+     * Repository identity used for aggregation and mirror merging continues to follow the system-wide key
+     * function ({@link #REPOSITORY_SYSTEM_REPOSITORY_KEY_FUNCTION}), whose default is unchanged.
+     * If the system-wide function is explicitly configured, tracking follows it (setting it to {@code "nid"}
+     * restores the legacy ID-only behaviour); this property, when set, overrides both.
+     * <p>
+     * Tracking entries written under a different function than the active one never match a lookup and never
+     * enable the untracked-file fallback: affected artifacts are treated as locally unavailable and
+     * re-fetched (with checksum validation) once.
+     *
+     * @since 2.0.23
+     * @configurationSource {@link RepositorySystemSession#getConfigProperties()}
+     * @configurationType {@link java.lang.String}
+     * @configurationDefaultValue {@link #DEFAULT_REPOSITORY_TRACKING_REPOSITORY_KEY_FUNCTION}
+     */
+    public static final String REPOSITORY_TRACKING_REPOSITORY_KEY_FUNCTION =
+            PREFIX_SYSTEM + "trackingRepositoryKeyFunction";
+
+    public static final String DEFAULT_REPOSITORY_TRACKING_REPOSITORY_KEY_FUNCTION = "nid_hurl";
+
+    /**
      * A flag indicating whether version scheme cache statistics should be printed on JVM shutdown.
      * This is useful for analyzing cache performance and effectiveness in development and testing scenarios.
      *
@@ -595,6 +665,29 @@ public final class ConfigurationProperties {
      * @since 2.0.10
      */
     public static final boolean DEFAULT_VERSION_SCHEME_CACHE_DEBUG = false;
+
+    /**
+     * Boolean flag should the HTTP transport send HTTP <pre>Accept</pre> header to signal that it supports RFC 9457
+     * error messages. Some servers have issues with handling the HTTP Accept headers. Known servers not supporting it
+     * is for example Staging REST endpoint of Sonatype Nexus 2.
+     * This configuration is only about sending (or not sending) HTTP header with content of
+     * <pre>Accept: application/problem+json</pre> that may be required by some servers to trigger error reporting
+     * using RFC 9457.
+     *
+     * @since 2.0.19
+     * @configurationSource {@link RepositorySystemSession#getConfigProperties()}
+     * @configurationType {@link java.lang.Boolean}
+     * @configurationDefaultValue {@link #DEFAULT_HTTP_SEND_RFC9457_ACCEPT}
+     * @configurationRepoIdSuffix Yes
+     */
+    public static final String HTTP_SEND_RFC9457_ACCEPT = PREFIX_TRANSPORT_HTTP + "sendRfc9457Accept";
+
+    /**
+     * Default value to use if {@link #HTTP_SEND_RFC9457_ACCEPT} is not set: {@code true}.
+     *
+     * @since 2.0.19
+     */
+    public static final boolean DEFAULT_HTTP_SEND_RFC9457_ACCEPT = true;
 
     private ConfigurationProperties() {
         // hide constructor

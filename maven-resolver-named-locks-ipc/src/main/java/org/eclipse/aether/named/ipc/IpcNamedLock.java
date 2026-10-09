@@ -55,7 +55,12 @@ class IpcNamedLock extends NamedLockSupport {
         }
         try {
             String contextId = client.newContext(true, time, unit);
-            client.lock(Objects.requireNonNull(contextId), keys, time, unit);
+            try {
+                client.lock(Objects.requireNonNull(contextId), keys, time, unit);
+            } catch (TimeoutException e) {
+                tryUnlock(contextId);
+                return false;
+            }
             contexts.push(new Ctx(true, contextId, true));
             return true;
         } catch (TimeoutException e) {
@@ -75,7 +80,12 @@ class IpcNamedLock extends NamedLockSupport {
         }
         try {
             String contextId = client.newContext(false, time, unit);
-            client.lock(Objects.requireNonNull(contextId), keys, time, unit);
+            try {
+                client.lock(Objects.requireNonNull(contextId), keys, time, unit);
+            } catch (TimeoutException e) {
+                tryUnlock(contextId);
+                return false;
+            }
             contexts.push(new Ctx(true, contextId, false));
             return true;
         } catch (TimeoutException e) {
@@ -92,6 +102,17 @@ class IpcNamedLock extends NamedLockSupport {
         Ctx ctx = contexts.pop();
         if (ctx.acted) {
             client.unlock(ctx.contextId);
+        }
+    }
+
+    private void tryUnlock(String contextId) {
+        try {
+            client.unlock(contextId);
+        } catch (Exception e) {
+            // Best-effort cleanup: if unlock fails during timeout handling,
+            // we must not propagate the exception — doing so would crash the
+            // calling thread and skip latch countdowns in tests, causing hangs.
+            logger.warn("Unable to unlock (contextId = {}) after timeout", contextId, e);
         }
     }
 

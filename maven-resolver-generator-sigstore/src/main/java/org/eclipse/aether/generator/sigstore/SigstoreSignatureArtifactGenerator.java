@@ -28,6 +28,8 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 
 import dev.sigstore.KeylessSigner;
@@ -47,10 +49,11 @@ final class SigstoreSignatureArtifactGenerator implements ArtifactGenerator {
     private static final String ARTIFACT_EXTENSION = ".sigstore.json";
     private final Logger logger = LoggerFactory.getLogger(getClass());
     private final PathProcessor pathProcessor;
-    private final ArrayList<Artifact> artifacts;
+    private final List<Artifact> artifacts;
     private final Predicate<Artifact> signableArtifactPredicate;
     private final boolean publicStaging;
-    private final ArrayList<Path> signatureTempFiles;
+    private final List<Path> signatureTempFiles;
+    private final AtomicBoolean closed;
 
     SigstoreSignatureArtifactGenerator(
             PathProcessor pathProcessor,
@@ -62,6 +65,7 @@ final class SigstoreSignatureArtifactGenerator implements ArtifactGenerator {
         this.signableArtifactPredicate = signableArtifactPredicate;
         this.publicStaging = publicStaging;
         this.signatureTempFiles = new ArrayList<>();
+        this.closed = new AtomicBoolean(false);
         logger.debug("Created sigstore generator (publicStaging={})", publicStaging);
     }
 
@@ -71,14 +75,35 @@ final class SigstoreSignatureArtifactGenerator implements ArtifactGenerator {
     }
 
     @Override
-    public Collection<? extends Artifact> generate(Collection<? extends Artifact> generatedArtifacts) {
+    public synchronized Collection<? extends Artifact> generate(Collection<? extends Artifact> generatedArtifacts) {
         try {
             artifacts.addAll(generatedArtifacts);
 
-            // back out if Sigstore signatures found among artifacts
-            if (artifacts.stream().anyMatch(a -> a.getExtension().endsWith(ARTIFACT_EXTENSION))) {
-                logger.debug("Sigstore signatures are present among artifacts, bailing out");
+            // Determine, per artifact, which signable artifacts still need a signature. A pre-existing signature
+            // skips only the artifact it covers; it must not disable signing of the whole artifact set, which
+            // would silently publish partially unsigned releases.
+            ArrayList<Artifact> artifactsToSign = new ArrayList<>();
+            for (Artifact artifact : artifacts) {
+                if (isSignatureArtifact(artifact)) {
+                    continue; // never sign a signature
+                }
+                if (!signableArtifactPredicate.test(artifact)) {
+                    continue;
+                }
+                if (hasSignature(artifact)) {
+                    logger.debug("Sigstore signature already present for {}, not signing it again", artifact);
+                    continue;
+                }
+                artifactsToSign.add(artifact);
+            }
+            if (artifactsToSign.isEmpty()) {
+                logger.debug("Sigstore signatures are present for all signable artifacts, nothing to sign");
                 return Collections.emptyList();
+            }
+            if (artifacts.stream().anyMatch(this::isSignatureArtifact)) {
+                logger.info(
+                        "Sigstore signatures are present for some artifacts only; signing the remaining {} artifact(s)",
+                        artifactsToSign.size());
             }
 
             // sign relevant artifacts
@@ -88,47 +113,45 @@ final class SigstoreSignatureArtifactGenerator implements ArtifactGenerator {
             try (KeylessSigner signer = publicStaging
                     ? KeylessSigner.builder().sigstoreStagingDefaults().build()
                     : KeylessSigner.builder().sigstorePublicDefaults().build()) {
-                for (Artifact artifact : artifacts) {
-                    if (signableArtifactPredicate.test(artifact)) {
-                        Path fileToSign = artifact.getPath();
-                        Path signatureTempFile = Files.createTempFile("signer-sigstore", "tmp");
-                        signatureTempFiles.add(signatureTempFile);
+                for (Artifact artifact : artifactsToSign) {
+                    Path fileToSign = artifact.getPath();
+                    Path signatureTempFile = Files.createTempFile("signer-sigstore", "tmp");
+                    signatureTempFiles.add(signatureTempFile);
 
-                        logger.debug("Signing " + artifact);
-                        long start = System.currentTimeMillis();
-                        Bundle bundle = signer.signFile(fileToSign);
+                    logger.debug("Signing " + artifact);
+                    long start = System.currentTimeMillis();
+                    Bundle bundle = signer.signFile(fileToSign);
 
-                        X509Certificate cert = (X509Certificate)
-                                bundle.getCertPath().getCertificates().get(0);
-                        long durationMinutes = Certificates.validity(cert, ChronoUnit.MINUTES);
+                    X509Certificate cert = (X509Certificate)
+                            bundle.getCertPath().getCertificates().get(0);
+                    long durationMinutes = Certificates.validity(cert, ChronoUnit.MINUTES);
 
-                        logger.debug("  Fulcio certificate (valid for "
-                                + durationMinutes
-                                + " m) obtained for "
-                                + cert.getSubjectAlternativeNames()
-                                        .iterator()
-                                        .next()
-                                        .get(1)
-                                + " (by "
-                                + FulcioOidHelper.getIssuerV2(cert)
-                                + " IdP)");
+                    logger.debug("  Fulcio certificate (valid for "
+                            + durationMinutes
+                            + " m) obtained for "
+                            + cert.getSubjectAlternativeNames()
+                                    .iterator()
+                                    .next()
+                                    .get(1)
+                            + " (by "
+                            + FulcioOidHelper.getIssuerV2(cert)
+                            + " IdP)");
 
-                        pathProcessor.write(signatureTempFile, bundle.toJson());
+                    pathProcessor.write(signatureTempFile, bundle.toJson());
 
-                        long duration = System.currentTimeMillis() - start;
-                        logger.debug("  > Rekor entry "
-                                + bundle.getEntries().get(0).getLogIndex()
-                                + " obtained in "
-                                + duration
-                                + " ms, saved to "
-                                + signatureTempFile);
+                    long duration = System.currentTimeMillis() - start;
+                    logger.debug("  > Rekor entry "
+                            + bundle.getEntries().get(0).getLogIndex()
+                            + " obtained in "
+                            + duration
+                            + " ms, saved to "
+                            + signatureTempFile);
 
-                        result.add(new SubArtifact(
-                                artifact,
-                                artifact.getClassifier(),
-                                artifact.getExtension() + ARTIFACT_EXTENSION,
-                                signatureTempFile.toFile()));
-                    }
+                    result.add(new SubArtifact(
+                            artifact,
+                            artifact.getClassifier(),
+                            artifact.getExtension() + ARTIFACT_EXTENSION,
+                            signatureTempFile.toFile()));
                 }
             } finally {
                 Thread.currentThread().setContextClassLoader(originalClassLoader);
@@ -146,14 +169,30 @@ final class SigstoreSignatureArtifactGenerator implements ArtifactGenerator {
         }
     }
 
+    private boolean isSignatureArtifact(Artifact artifact) {
+        return artifact.getExtension().endsWith(ARTIFACT_EXTENSION);
+    }
+
+    private boolean hasSignature(Artifact artifact) {
+        String signatureExtension = artifact.getExtension() + ARTIFACT_EXTENSION;
+        return artifacts.stream()
+                .anyMatch(a -> a.getExtension().equals(signatureExtension)
+                        && a.getClassifier().equals(artifact.getClassifier())
+                        && a.getArtifactId().equals(artifact.getArtifactId())
+                        && a.getGroupId().equals(artifact.getGroupId())
+                        && a.getVersion().equals(artifact.getVersion()));
+    }
+
     @Override
     public void close() {
-        signatureTempFiles.forEach(p -> {
-            try {
-                Files.deleteIfExists(p);
-            } catch (IOException e) {
-                p.toFile().deleteOnExit();
-            }
-        });
+        if (closed.compareAndSet(false, true)) {
+            signatureTempFiles.forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException e) {
+                    p.toFile().deleteOnExit();
+                }
+            });
+        }
     }
 }
